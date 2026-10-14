@@ -1,13 +1,16 @@
 """Книга рецептов (plan/02, раздел «Интерфейс»).
 
-Одно окно на две колонки:
+Одно окно на три колонки:
 - **слева рецепты ролей**: известные — с требованием и кнопкой крафта,
   неизвестные — «???» с подсказкой нужного свойства (какую роль открывает
   какая реликвия, игрок узнаёт, изучив её);
-- **справа материалы забега**: значок, название, слоты свойств (открытые —
+- **в середине материалы забега**: значок, название, слоты свойств (открытые —
   значком свойства, закрытые — `?`) и количество в инвентаре. Колонка только
   справка: образцы игрок кладёт в лабораторию сам, через её слоты
-  (ПКМ по лаборатории, см. `ui/item_window.py`, M3.5).
+  (ПКМ по лаборатории, см. `ui/item_window.py`, M3.5);
+- **справа постройки и роботы**: только **известные** рецепты предметов-построек
+  и роботов (plan/02: неизвестного не показываем). Робота собирают только у
+  запитанной мастерской (M7) — кнопка это и пишет.
 
 Окно только читает состояние симуляции; действие отдаёт ей же (`sim.craft`).
 """
@@ -17,8 +20,9 @@ from __future__ import annotations
 import pygame
 
 from src.game import config
-from src.game.data.buildings import LAB
-from src.game.data.recipes import ROLES, role as role_def
+from src.game.data.buildings import BUILD_ORDER, LAB
+from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
+from src.game.data.robots import ROBOT_TYPES
 from src.game.data.resources import PROP_NAMES
 from src.game.render import theme
 from src.game.render.icons import IconCache
@@ -26,21 +30,23 @@ from src.game.sim.research import plan_craft
 from src.game.sim.simulation import Simulation
 from src.game.ui import widgets
 
-WIN_W = 880
+WIN_W = 1240
 ROW_H = 30
 PAD = 14
 COL_GAP = 18
 HEAD_H = 70      # заголовок окна плюс подписи колонок
 FOOT_H = 56
 LEFT_W = 430
-RIGHT_W = WIN_W - PAD * 3 - COL_GAP - LEFT_W
+RIGHT_W = 390
+ITEMS_W = WIN_W - PAD * 3 - COL_GAP * 2 - LEFT_W - RIGHT_W
 UNKNOWN_TEXT = "???"
 #: Как подписана вторая (усиленная) строка роли.
 AMPLIFIED_MARK = "усил. "
 
 #: Сколько строк нужно колонке: рецептов (по два на роль) или материалов
 #: (обычные ресурсы + редкий — ровно столько их делает генератор забега).
-COL_ROWS = max(len(ROLES) * 2, config.RESOURCES_PER_RUN + 1)
+COL_ROWS = max(len(ROLES) * 2, config.RESOURCES_PER_RUN + 1,
+               len(BUILD_ORDER) + len(ROBOT_TYPES))
 
 
 class RecipeBook:
@@ -82,8 +88,10 @@ class RecipeBook:
 
         left = (x + PAD, y + HEAD_H, LEFT_W, self.rows * ROW_H)
         right = (left[0] + LEFT_W + COL_GAP, y + HEAD_H, RIGHT_W, self.rows * ROW_H)
+        items = (right[0] + RIGHT_W + COL_GAP, y + HEAD_H, ITEMS_W, self.rows * ROW_H)
         self._draw_recipes(target, left, sim)
         self._draw_materials(target, right, sim)
+        self._draw_item_recipes(target, items, sim)
         self._draw_footer(target, (x + PAD, left[1] + left[3] + 8, w - PAD * 2, FOOT_H),
                           sim)
 
@@ -129,7 +137,7 @@ class RecipeBook:
     def _draw_craft_button(self, target: pygame.Surface, rect: tuple[int, int, int, int],
                            sim: Simulation, recipe) -> None:
         """Кнопка крафта с отметкой «можно сейчас» (plan/02)."""
-        plan = plan_craft(recipe, sim.inventory, sim.run.items)
+        plan = plan_craft(recipe, sim.cargo, sim.run.items)
         ready = plan is not None
         x, y, w, h = rect
         if ready:
@@ -141,6 +149,44 @@ class RecipeBook:
             # Не хватает материалов: кнопка гаснет, но строка остаётся —
             # игрок должен видеть, к чему стремится.
             widgets.draw_text(target, "мало", (x + w // 2, y + 5), align="center",
+                              color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
+
+    # ------------------------------------------- колонка построек и роботов
+    def _draw_item_recipes(self, target: pygame.Surface, rect: tuple[int, int, int, int],
+                           sim: Simulation) -> None:
+        x, y, w, _h = rect
+        widgets.draw_text(target, "Постройки и роботы", (x, y - 22),
+                          color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
+        row = 0
+        for recipe in sim.run.recipes:
+            if recipe.role in ROLE_IDS or not sim.knowledge.is_known(recipe.id):
+                continue
+            if row >= self.rows:
+                break
+            ry = y + row * ROW_H
+            row += 1
+            item = sim.run.items[recipe.role]
+            target.blit(self.icons.item_icon(item.id), (x + 2, ry + 3))
+            widgets.draw_text(target, item.name, (x + 30, ry + 6), size=config.UI_FONT_SIZE)
+            # Требование — значками свойств: рецепт известен, значит его
+            # свойства игрок уже видел (plan/02).
+            rx = x + 142
+            for prop, count in recipe.requires:
+                target.blit(self.icons.prop_icon(prop), (rx, ry + 3))
+                widgets.draw_text(target, f"×{count}", (rx + 25, ry + 7),
+                                  color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
+                rx += 46
+            button = (x + w - 66, ry + 2, 64, ROW_H - 4)
+            if recipe.role in ROBOT_TYPES:
+                workshop = sim.workshop_near()
+                if workshop is None or not workshop.powered:
+                    widgets.draw_text(target, "мастерская", (button[0] + 32, ry + 7),
+                                      align="center", color=theme.UI_TEXT_DIM,
+                                      size=config.UI_FONT_SIZE_SMALL)
+                    continue
+            self._draw_craft_button(target, button, sim, recipe)
+        if row == 0:
+            widgets.draw_text(target, "откроются реликвиями", (x, y + 6),
                               color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
 
     # -------------------------------------------------------- колонка материалов
@@ -183,7 +229,7 @@ class RecipeBook:
         widgets.draw_text(
             target,
             f"свойств открыто {known}/{total} · рецептов "
-            f"{sim.knowledge.known_count}/{len(ROLES) * 2} · реликвий "
+            f"{sim.knowledge.known_count}/{len(sim.run.recipes)} · реликвий "
             f"{studied}/{len(sim.relics)} · лабораторий {len(labs)} "
             f"(в работе {analyzing})",
             (x, y + 20), color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)

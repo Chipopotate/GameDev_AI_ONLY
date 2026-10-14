@@ -113,6 +113,7 @@ WATER_GLINT_ALPHA = 46     # плотность блика по воде, 0..255
 #: Заражение (M8): плотность активного и погасшего слоя, 0..255.
 INFECT_ACTIVE_ALPHA = 110
 INFECT_DEAD_ALPHA = 55
+ROBOT_SIZE = 0.9           # доля тайла под робота (M7)
 SPROUT_SIZE = 1.6          # доля тайла под росток
 INCUBATOR_SIZE = 1.1       # и под инкубатор
 
@@ -199,6 +200,7 @@ class Renderer:
         self._draw_drops(target, camera, sim)
         self._draw_building_bars(target, camera, sim)
         self._draw_enemies(target, camera, sim)
+        self._draw_robots(target, camera, sim)
         self._draw_drone(target, sim, camera)
         self._draw_bars(target, sim, camera)
         # Тьма — поверх мира, но под интерфейсом.
@@ -322,6 +324,23 @@ class Renderer:
             end = camera.world_to_screen(*action.target_world_pos)
             pygame.draw.line(target, theme.laser_color(action.kind), start, end,
                              max(2, int(tile * 0.08)))
+
+    def _draw_robots(self, target: pygame.Surface, camera: Camera,
+                     sim: Simulation) -> None:
+        """Роботы (урезанный M7): корпус с модулем, здоровье и след выстрела."""
+        size = max(8, int(config.TILE * camera.zoom * ROBOT_SIZE))
+        for robot in sim.robots.robots:
+            t = robot.type
+            sprite = self.sprites.chassis(size, t.chassis, robot.facing, t.modules)
+            sx, sy = camera.world_to_screen(robot.x, robot.y)
+            target.blit(sprite, sprite.get_rect(center=(int(sx), int(sy))))
+            if robot.hp < robot.max_hp:
+                self._progress_bar(target, camera, robot.x, robot.y,
+                                   robot.hp / robot.max_hp, theme.OK, dy=int(size * 0.5) + 2)
+            if robot.shot_time > 0.0 and robot.shot is not None:
+                end = camera.world_to_screen(*robot.shot)
+                pygame.draw.line(target, theme.NEON_CYAN, (int(sx), int(sy)),
+                                 (int(end[0]), int(end[1])), max(1, size // 14))
 
     # ------------------------------------------------------------- залежи
     def _draw_deposits(self, target: pygame.Surface, camera: Camera,

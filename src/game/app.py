@@ -113,9 +113,10 @@ class Game:
         tile = self.tile_at_screen(pos)
         kind = self.sim.selected_building()
         # ПКМ по залежи — это скан: «здесь не построить» не нужно.
-        if kind is None or (self.sim.world.deposit_at(*tile) is not None
-                            and not self.sim.can_place(kind, *tile)):
+        if self.sim.world.deposit_at(*tile) is not None \
+                and (kind is None or not self.sim.can_place(kind, *tile)):
             return
+        # Постройка или робот (M7) из выбранного слота; ресурс — не команда.
         self.sim.place_building(self.sim.selected_slot, tile)
 
     def handle_event(self, event: pygame.event.Event) -> None:

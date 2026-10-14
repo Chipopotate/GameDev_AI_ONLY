@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from src.game import config
 from src.game.data.buildings import (BUILDING_ITEMS, BUILDING_RECIPES,
                                      BUILDING_START, building as building_def)
+from src.game.data.robots import ROBOT_ITEMS, ROBOT_RECIPES
 from src.game.data.recipes import CRAFTED_ITEMS, RECIPES, ROLES, Recipe
 from src.game.data.resources import (
     RESOURCE_SHAPES,
@@ -179,7 +180,7 @@ def generate_run(seed: int) -> RunPlan:
     # Рецепты построек идут в тот же список, что рецепты ролей: `run.recipe(id)`
     # и панель крафта не различают их — крафт у них общий (plan/02).
     return RunPlan(seed=seed, items=items,
-                   recipes=RECIPES + BUILDING_RECIPES, relics=relics)
+                   recipes=RECIPES + BUILDING_RECIPES + ROBOT_RECIPES, relics=relics)
 
 
 def _generate_items(rng: random.Random) -> ItemTable:
@@ -215,7 +216,8 @@ def _generate_items(rng: random.Random) -> ItemTable:
 
     _ensure_sources(items, rng)
 
-    table = ItemTable(tuple(items) + (rare,) + CRAFTED_ITEMS + BUILDING_ITEMS)
+    table = ItemTable(tuple(items) + (rare,) + CRAFTED_ITEMS + BUILDING_ITEMS
+                      + ROBOT_ITEMS)
     if not table.rare_id or len(table.natural) != count + 1:
         raise AssertionError("генератор забега собрал некорректный набор ресурсов")
     return table

@@ -24,7 +24,7 @@ import math
 import pygame
 
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR,
-                                     LAB, LAMP, STORAGE, WIRE)
+                                     LAB, LAMP, STORAGE, WIRE, WORKSHOP)
 from src.game.render import theme
 from src.game.render.sprites import factory
 
@@ -45,6 +45,7 @@ ROLE_COLOR: dict[str, tuple[int, int, int]] = {
     STORAGE: theme.STEEL_LIGHT,
     ASSEMBLER: theme.hue_shift(theme.NEON_CYAN, 60),
     GENERATOR: theme.NEON_AMBER,
+    WORKSHOP: theme.NEON_AZURE,
 }
 
 
@@ -287,6 +288,21 @@ def _draw_generator(surf: pygame.Surface, s: float, body, role) -> None:
                       max(1, s * 0.02))
 
 
+def _draw_workshop(surf: pygame.Surface, s: float, body, role) -> None:
+    """Мастерская (M7): панель с перекрестьем ключей и гнездом сборки."""
+    rect = _rect(s, 0.08)
+    factory.bevel_frame(surf, rect, body, s * 0.08)
+    c = s / 2.0
+    w = max(1, int(s * 0.07))
+    for (ax, ay), (bx, by) in (((0.26, 0.26), (0.74, 0.74)), ((0.74, 0.26), (0.26, 0.74))):
+        pygame.draw.line(surf, theme.darken(body, 0.55), (s * ax, s * ay), (s * bx, s * by), w)
+    factory.circle(surf, theme.OUTLINE, c, c, s * 0.17)
+    factory.circle(surf, theme.darken(role, 0.5), c, c, s * 0.13)
+    factory.ring(surf, role, c, c, s * 0.13, max(1, s * 0.022))
+    factory.neon_edge(surf, rect.inflate(-s * 0.03, -s * 0.03), role, s * 0.08,
+                      max(1, s * 0.018))
+
+
 _DRAW = {
     LAMP: _draw_lamp,
     LAB: _draw_lab,
@@ -296,6 +312,7 @@ _DRAW = {
     STORAGE: _draw_storage,
     ASSEMBLER: _draw_assembler,
     GENERATOR: _draw_generator,
+    WORKSHOP: _draw_workshop,
 }
 
 

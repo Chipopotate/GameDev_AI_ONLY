@@ -38,6 +38,7 @@ WIRE = "wire"
 STORAGE = "storage"
 ASSEMBLER = "assembler"
 GENERATOR = "generator"
+WORKSHOP = "workshop"   # мастерская: рядом с ней крафтятся роботы (M7)
 
 #: Роли контейнеров: куда конвейер кладёт и откуда берёт.
 PORT_IN = "in"          # принимает предметы (вход сборщика, образцы лаборатории)
@@ -54,7 +55,8 @@ WORK_CRAFT = "craft"
 LAB_SAMPLES = "samples"
 
 #: Порядок зданий задаёт клавиши 1…8 в app.py (см. `sim.BUILDINGS`).
-BUILD_ORDER = (LAMP, LAB, DRILL, CONVEYOR, WIRE, STORAGE, ASSEMBLER, GENERATOR)
+BUILD_ORDER = (LAMP, LAB, DRILL, CONVEYOR, WIRE, STORAGE, ASSEMBLER, GENERATOR,
+               WORKSHOP)
 
 #: На какой тайл ставится здание: свободная земля или залежь (бур).
 PLACE_GROUND = "ground"
@@ -229,6 +231,14 @@ BUILDING_TYPES: dict[str, BuildingDef] = {
         unlock_role=ROLE_ENERGY,
         hp=80, enemy_priority=7, power_out=6.0,
         fuel=(Prop.FLAMMABLE, "energy"),
+    ),
+    # Мастерская (урезанный M7, plan/04): своей работы нет — роботы крафтятся
+    # руками, но только рядом с ней и пока её питает сеть.
+    WORKSHOP: BuildingDef(
+        WORKSHOP, "Мастерская", "hexagon", (150, 200, 240),
+        recipe=_item_recipe(WORKSHOP, ((Prop.TOUGH, 4), (Prop.CONDUCTIVE, 3)), 3.0),
+        unlock_role=ROLE_AUTOMATION,
+        hp=90, enemy_priority=6, needs_power=True, power_use=2.0,
     ),
 }
 

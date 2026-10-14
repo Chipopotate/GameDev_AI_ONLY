@@ -41,7 +41,9 @@ from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES, BUILD_ORDER
                                      unlocked_by)
 from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
 from src.game.data.resources import PROP_NAMES, Prop
+from src.game.data.buildings import WORKSHOP
 from src.game.data.enemies import INCUBATOR_TYPES, SHADOW
+from src.game.data.robots import ROBOT_TYPES, unlocked_robots
 from src.game.sim.bases import BaseSystem, Incubator, Sprout
 from src.game.sim.buildings import DIRECTIONS, Building, BuildingSystem, CraftResult
 from src.game.sim.drops import DropSystem
@@ -49,6 +51,7 @@ from src.game.sim.enemies import Enemy, EnemySystem
 from src.game.sim.light import Lamp, LightSystem
 from src.game.sim.power import PowerNode, PowerSystem
 from src.game.sim.research import Knowledge, plan_craft
+from src.game.sim.robots import Robot, RobotSystem
 from src.game.sim.resources import (Cargo, Hotbar, Inventory, Stack, give,
                                     transfer)
 from src.game.sim.run_gen import Relic, RunPlan, generate_run
@@ -153,6 +156,7 @@ class Simulation:
         self.bases = BaseSystem(self.world, random.Random(seed ^ config.BASES_SALT))
         self.bases.generate(self._base_blocked)
         self.enemies = EnemySystem(self.world, random.Random(seed ^ config.ENEMY_SALT))
+        self.robots = RobotSystem(self.world)   # урезанный M7
         self._collapse_plan = self.world.plan_collapses(
             random.Random(seed ^ config.BASES_SALT ^ 0x1), config.COLLAPSE_PLANNED)
         self.collapses_done = 0
@@ -533,6 +537,10 @@ class Simulation:
                 if definition.recipe is not None \
                         and self.knowledge.learn(definition.recipe.id):
                     self.toast(f"Открыта постройка: {definition.name}")
+            # Роботы (M7) открываются той же реликвией, что и мастерская.
+            for kind in unlocked_robots(role.id):
+                if self.knowledge.learn(ROBOT_TYPES[kind].recipe.id):
+                    self.toast(f"Открыт робот: {ROBOT_TYPES[kind].name}")
         return True
 
     # --------------------------------------------------------------- скан
@@ -853,6 +861,8 @@ class Simulation:
         if self.time - self._last_craft_time < config.HANDCRAFT_TIME:
             return False
         recipe = self.run.recipe(recipe_id)
+        if recipe.role in ROBOT_TYPES and not self._workshop_ready():
+            return False
         made = 0
         for _ in range(times):
             if not self._craft_once(recipe):
@@ -863,6 +873,21 @@ class Simulation:
         self._last_craft_time = self.time
         name = self.run.items[recipe.role].name
         self.toast(f"+{recipe.outputs * made} {name}")
+        return True
+
+    def workshop_near(self) -> Building | None:
+        """Мастерская в 🔧 `WORKSHOP_RANGE` от дрона: только у неё собирают роботов."""
+        return self.buildings.nearest(self.drone.x, self.drone.y, WORKSHOP,
+                                      config.WORKSHOP_RANGE)
+
+    def _workshop_ready(self) -> bool:
+        workshop = self.workshop_near()
+        if workshop is None:
+            self.toast("Робота собирают у мастерской")
+            return False
+        if not workshop.powered:
+            self.toast("Мастерская без энергии")
+            return False
         return True
 
     def _craft_once(self, recipe) -> bool:
@@ -1020,6 +1045,8 @@ class Simulation:
         x, y = int(tile[0]), int(tile[1])
         stack = self.hotbar.slot(slot)
         item = self.run.items.get(stack.item_id) if stack is not None else None
+        if item is not None and item.robot is not None:
+            return self._place_robot(slot, item.robot, x, y)
         kind = item.building if item is not None else None
         if kind is None:
             return None
@@ -1034,6 +1061,19 @@ class Simulation:
         self.hotbar.take_slot(slot, 1)
         self.toast(f"Построено: {building_def(kind).name}")
         return placed
+
+    def _place_robot(self, slot: int, kind: str, x: int, y: int) -> Robot | None:
+        """Робот из хотбара встаёт на свободную землю рядом с дроном (M7)."""
+        if not self.world.is_walkable_tile(x, y) or not self.in_build_range(x, y):
+            self.toast("Здесь не поставить")
+            return None
+        robot = self.robots.spawn(kind, x + 0.5, y + 0.5)
+        if robot is None:
+            self.toast(f"Роботов уже {config.ROBOT_MAX}")
+            return None
+        self.hotbar.take_slot(slot, 1)
+        self.toast(f"{robot.type.name} в строю")
+        return robot
 
     def _spawn(self, kind: str, x: int, y: int,
                direction: tuple[int, int]) -> Building | Lamp | None:
@@ -1158,9 +1198,14 @@ class Simulation:
                     self.enemies.spawn(SHADOW, tile[0] + 0.5, tile[1] + 0.5,
                                        self.time_cycle.day_number)
         hits = self.enemies.update(dt, self._enemy_structures,
-                                   (self.drone.x, self.drone.y))
-        for tile, damage in hits:
-            self._hit_structure(tile, damage)
+                                   (self.drone.x, self.drone.y), self.robots.robots)
+        for target, damage in hits:
+            if isinstance(target, Robot):
+                if self.robots.damage(target, damage):
+                    self.toast(f"Потерян: {target.type.name}")
+            else:
+                self._hit_structure(target, damage)
+        self.robots.update(dt, (self.drone.x, self.drone.y), self.enemies)
 
     def _shadow_tile(self) -> tuple[int, int] | None:
         """Тёмный доступный тайл около дрона: только там рождаются Тени (plan/05)."""
@@ -1366,6 +1411,7 @@ class Simulation:
             self.world.version,
             self.bases.state(),
             self.enemies.state(),
+            self.robots.state(),
         )
 
     @property

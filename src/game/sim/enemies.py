@@ -105,9 +105,13 @@ class EnemySystem:
         return best
 
     # ------------------------------------------------------------- обновление
-    def update(self, dt: float, structures_fn, drone_pos: tuple[float, float]
-               ) -> list[tuple[Tile, float]]:
-        """Шаг врагов. Возвращает удары по постройкам: (тайл, урон)."""
+    def update(self, dt: float, structures_fn, drone_pos: tuple[float, float],
+               units=()) -> list[tuple[object, float]]:
+        """Шаг врагов. Возвращает удары: (тайл постройки или юнит, урон).
+
+        `units` — роботы игрока (M7): робот в радиусе атаки бьётся первым,
+        иначе отряд был бы бессмертным.
+        """
         if not self.enemies:
             return []
         self._field_timer -= dt
@@ -115,11 +119,12 @@ class EnemySystem:
             self._field_timer = config.ENEMY_FIELD_REFRESH
             self.structures = structures_fn()
             self._refresh_field()
-        hits: list[tuple[Tile, float]] = []
+        hits: list[tuple[object, float]] = []
         for enemy in self.enemies:
             enemy.cooldown = max(0.0, enemy.cooldown - dt)
             t = enemy.type
-            goal = self._target_in_range(enemy, t)
+            goal = self._unit_in_range(enemy, t, units) or \
+                self._target_in_range(enemy, t)
             if goal is not None:
                 if enemy.cooldown <= 0.0:
                     enemy.cooldown = t.attack_cooldown
@@ -134,6 +139,13 @@ class EnemySystem:
     def _score(self, t: EnemyType, kind: str, dist: float) -> float:
         prio = building_def(kind).enemy_priority * t.priorities.get(kind, 1.0)
         return prio / (1.0 + dist * 0.1)
+
+    @staticmethod
+    def _unit_in_range(enemy: Enemy, t: EnemyType, units):
+        for unit in units:
+            if math.hypot(unit.x - enemy.x, unit.y - enemy.y) <= t.attack_range + 0.3:
+                return unit
+        return None
 
     def _target_in_range(self, enemy: Enemy, t: EnemyType) -> Tile | None:
         if not self.structures:

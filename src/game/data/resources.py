@@ -89,6 +89,8 @@ class ItemDef:
     hint: Prop | None = None
     #: id здания, которое ставится этим предметом (`None` — не постройка).
     building: str | None = None
+    #: id робота, который ставится этим предметом (M7, `data/robots.py`).
+    robot: str | None = None
     #: Лимит стека. Обычно 🔧 `SLOT_STACK_MAX`, у построек — 🔧 `BUILDING_STACK`.
     stack_max: int = config.SLOT_STACK_MAX
 

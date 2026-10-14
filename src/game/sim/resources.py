@@ -423,7 +423,8 @@ class Cargo:
     def is_building(self, item_id: str) -> bool:
         """Ставится ли этот предмет как здание."""
         item = self.table.get(item_id)
-        return item is not None and item.building is not None
+        # Робот (M7) ставится из хотбара так же, как постройка.
+        return item is not None and (item.building is not None or item.robot is not None)
 
     # ----------------------------------------------------------- запись
     def fits(self, item_id: str, amount: int = 1) -> int:

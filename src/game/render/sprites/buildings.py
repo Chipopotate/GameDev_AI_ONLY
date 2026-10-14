@@ -24,7 +24,8 @@ import math
 import pygame
 
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR,
-                                     LAB, LAMP, STORAGE, TURRET, WALL, WIRE)
+                                     LAB, LAMP, STORAGE, TURRET, WALL, WIRE,
+                                     WORKSHOP)
 from src.game.render import theme
 from src.game.render.sprites import factory
 
@@ -47,6 +48,7 @@ ROLE_COLOR: dict[str, tuple[int, int, int]] = {
     GENERATOR: theme.NEON_AMBER,
     TURRET: theme.NEON_CYAN,
     WALL: theme.STEEL_LIGHT,
+    WORKSHOP: theme.NEON_AZURE,
 }
 
 
@@ -321,6 +323,7 @@ _DRAW = {
     GENERATOR: _draw_generator,
     TURRET: _draw_turret,
     WALL: _draw_wall,
+    WORKSHOP: _draw_assembler,
 }
 
 

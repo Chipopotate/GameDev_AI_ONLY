@@ -26,6 +26,7 @@ from src.game.data.buildings import (ASSEMBLER, BUILD_ORDER, CONVEYOR, DRILL,
                                      PORT_OUT, PORT_STORE, ROLE_AUTOMATION,
                                      ROLE_AMMO, ROLE_ENERGY, ROLE_STRUCTURE,
                                      STORAGE, TURRET, WALL, WIRE, WORK_CRAFT,
+                                     WORKSHOP,
                                      building as building_def)
 from src.game.data.recipes import ROLES, recipe as recipe_def
 from src.game.data.resources import PROP_NAMES, Prop
@@ -222,6 +223,8 @@ def test_buildings_unlock_by_the_base_relic_of_their_role():
         GENERATOR: ROLE_ENERGY,
         # M5: турель открывает реликвия «боеприпас», стену — «конструкции».
         TURRET: ROLE_AMMO, WALL: ROLE_STRUCTURE,
+        # M7: мастерскую открывает реликвия автоматики.
+        WORKSHOP: ROLE_AUTOMATION,
     }
     assert {kind: building_def(kind).unlock_role for kind in BUILD_ORDER} == expected
 

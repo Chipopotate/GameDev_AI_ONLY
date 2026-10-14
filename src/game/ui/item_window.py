@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 import pygame
 
 from src.game import config
-from src.game.data.buildings import WORK_CRAFT, building as building_def
+from src.game.data.buildings import WORK_CRAFT, WORK_ROBOT, building as building_def
+from src.game.data.robots import design as robot_design
 from src.game.data.recipes import role as role_def
 from src.game.render import theme
 from src.game.render.icons import IconCache
@@ -244,13 +245,19 @@ class ItemWindow:
                 if working else (),
                 slot_rows=working and definition.analyzes is not None,
                 action=self._action_label(sim) if working
-                and definition.work == WORK_CRAFT else None,
+                and definition.work in (WORK_CRAFT, WORK_ROBOT) else None,
             ))
         return panels
 
     def _action_label(self, sim: Simulation) -> str:
         """Надпись на кнопке сборщика: какой рецепт он собирает сейчас."""
         recipe_id = self.building.recipe
+        if building_def(self.building.kind).work == WORK_ROBOT:
+            # Мастерская: что собирает (выбор по кругу) и его цена в предметах.
+            if recipe_id is None:
+                return "Выбрать робота"
+            spec = robot_design(recipe_id)
+            return f"Робот: {spec.name}"
         if recipe_id is None:
             return NO_RECIPE_LABEL
         recipe = sim.run.recipe(recipe_id)

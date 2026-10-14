@@ -219,6 +219,13 @@ class EnemySystem:
             self._attack(sim, enemy, drone.x, drone.y, lambda: sim.damage_drone(
                 etype.damage, enemy))
             return
+        # Робот рядом — его бьют: танк «держит огонь» именно так (plan/04).
+        robots = getattr(sim, "robots", None)
+        robot = robots.at(enemy.x, enemy.y, etype.attack_range) if robots else None
+        if robot is not None:
+            self._attack(sim, enemy, robot.x, robot.y,
+                         lambda: sim.damage_robot(robot, etype.damage))
+            return
         self._walk(sim, enemy, dt)
 
     def _walk(self, sim, enemy: Enemy, dt: float) -> None:

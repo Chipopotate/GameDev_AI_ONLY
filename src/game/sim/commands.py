@@ -42,4 +42,14 @@ class DismantleBuilding:
     tile: tuple[int, int]
 
 
-Command = SelectHotbar | PlaceBuilding | DismantleBuilding
+@dataclass(frozen=True)
+class OrderRobots:
+    """Приказ роботам (M7, plan/04): `order` — `sim.robots.Order`; `queue` —
+    добавить в конец очереди (Shift), иначе заменить очередь."""
+
+    robot_ids: tuple[int, ...]
+    order: object
+    queue: bool = False
+
+
+Command = SelectHotbar | PlaceBuilding | DismantleBuilding | OrderRobots

@@ -34,17 +34,18 @@ from dataclasses import dataclass
 
 from src.game import config
 from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES,
-                                     LAB, LAMP, PLACE_DEPOSIT, WORK_CRAFT,
+                                     LAB, LAMP, PLACE_DEPOSIT, WORK_CRAFT, WORK_ROBOT,
                                      WORK_MOVE, building as building_def,
                                      unlocked_by)
 from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
 from src.game.data.enemies import ARTILLERY, MOSQUITO, SHADOW, WALKER, enemy_type
 from src.game.data.resources import PROP_NAMES, Prop
 from src.game.sim.buildings import DIRECTIONS, Building, BuildingSystem, CraftResult
-from src.game.sim.commands import (Command, DismantleBuilding, PlaceBuilding,
-                                   SelectHotbar)
+from src.game.sim.commands import (Command, DismantleBuilding, OrderRobots,
+                                   PlaceBuilding, SelectHotbar)
 from src.game.sim.drops import DropSystem
 from src.game.sim.enemies import EnemySystem
+from src.game.sim.robots import RobotSystem
 from src.game.sim.light import Lamp, LightSystem
 from src.game.sim.power import PowerNode, PowerSystem
 from src.game.sim.research import KnownItems, Knowledge, plan_craft
@@ -155,6 +156,8 @@ class Simulation:
         self.breach_point: tuple[int, int] | None = None
         self.losses = 0
         self._shadow_timer = 0.0
+        #: Роботы и мастерская (M7).
+        self.robots = RobotSystem()
 
         self.time = 0.0
         self.move_input: tuple[float, float] = (0.0, 0.0)
@@ -231,6 +234,8 @@ class Simulation:
             return self.place_building(command.slot, command.tile, command.rotation)
         if isinstance(command, DismantleBuilding):
             return self.dismantle_building(*command.tile)
+        if isinstance(command, OrderRobots):
+            return self.robots.order(set(command.robot_ids), command.order, command.queue)
         raise TypeError(f"неизвестная команда: {command!r}")
 
     def scroll_hotbar(self, step: int) -> int:
@@ -335,6 +340,7 @@ class Simulation:
                 if self.enemies.count(SHADOW) < config.SHADOW_MAX:
                     self.enemies.spawn_dark(self, SHADOW, 1)
         self.enemies.update(self, dt)
+        self.robots.update(self, dt)
 
     def damage_structure(self, target: Building | Lamp, damage: float) -> None:
         """Удар врага по постройке. На нуле прочности она разрушается."""
@@ -360,6 +366,10 @@ class Simulation:
         if self.breach_point is None:
             self.breach_point = (target.x, target.y)
         self.toast(f"Потеряно: {name}")
+
+    def damage_robot(self, robot, damage: float) -> None:
+        """Удар по роботу. 🔧 `ROBOTS_EXPENDABLE`: погибший робот потерян (plan/04)."""
+        robot.hp -= damage
 
     def damage_drone(self, damage: float, enemy) -> None:
         """Удар по дрону. Смерть дрона — поражение (plan/00)."""
@@ -1217,6 +1227,11 @@ class Simulation:
         Только предметы ролей: постройка — не то, что сборщик умеет делать
         (он собирает предметы для конвейера), да и роль у неё своя собственная.
         """
+        if building_def(building.kind).work == WORK_ROBOT:
+            design_id = self.robots.cycle_design(building)
+            from src.game.data.robots import design as robot_design
+            self.toast(f"Мастерская: {robot_design(design_id).name.lower()}")
+            return design_id
         if building_def(building.kind).work != WORK_CRAFT:
             return None
         # Фильтр — по роли рецепта, а не по id: у усилителя id «energy+», но
@@ -1271,6 +1286,7 @@ class Simulation:
             self.scans_done,
             self.crafted_total,
             self.enemies.state(),
+            self.robots.state(),
             self.defeated,
         )
 

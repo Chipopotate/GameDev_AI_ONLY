@@ -32,6 +32,7 @@ from src.game import config
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR, LAB,
                                      STORAGE, TURRET, building as building_def)
 from src.game.data.enemies import enemy_type
+from src.game.data.robots import CHASSIS, ammo_capacity, carry_of, design as robot_design
 from src.game.sim.enemies import (AMMO_ITEM, SHOT_ARTILLERY, SHOT_DRONE, SHOT_ENEMY,
                                   SHOT_TURRET)
 from src.game.data.relics import relic_def
@@ -147,6 +148,7 @@ class Renderer:
         self.water = TileOverlay()
         # Поле пути врагов (F1, M5) — отдельный слой, как отладочный слой света.
         self.flow_overlay = TileOverlay()
+        self._selected: set[int] = set()
         self.postfx = PostFX()
         self.particles = ParticlePool(0, self.sprites.factory)
         self.effects = EffectsDirector(self.particles, world.seed)
@@ -178,7 +180,7 @@ class Renderer:
     def draw_world(self, target: pygame.Surface, sim: Simulation, camera: Camera,
                    show_lit_layer: bool = False, dt: float = config.TICK,
                    ghost_tile: tuple[int, int] | None = None,
-                   show_flow: bool = False) -> None:
+                   show_flow: bool = False, selected=()) -> None:
         """Кадр целиком. Камера сдвигается на время тряски и возвращается назад.
 
         `ghost_tile` — тайл под курсором, если призрак постройки нужно
@@ -186,6 +188,7 @@ class Renderer:
         `dt == 0` — пауза: картинка замирает, а не исчезает.
         """
         self.anim_time += dt
+        self._selected = set(selected)
         self.effects.update(sim, dt)
         self.laser.update(sim.drone.action, dt)
         shake = self.effects.shake
@@ -220,6 +223,7 @@ class Renderer:
         self._draw_building_bars(target, camera, sim)
         self._draw_drone(target, sim, camera)
         self._draw_enemies(target, sim, camera)
+        self._draw_robots(target, sim, camera)
         self._draw_bars(target, sim, camera)
         # Тьма — поверх мира, но под интерфейсом.
         self._draw_darkness(target, sim, camera)
@@ -849,9 +853,43 @@ class Renderer:
             sx, sy = camera.world_to_screen(enemy.x, enemy.y)
             target.blit(art, art.get_rect(center=(int(sx), int(sy))))
 
+    def _draw_robots(self, target: pygame.Surface, sim: Simulation,
+                     camera: Camera) -> None:
+        """Роботы (M7): облик собирается из корпуса и модулей (plan/09 §6)."""
+        scale = camera.scale
+        for robot in sim.robots.robots:
+            spec = robot_design(robot.design)
+            size = max(10, int(scale * 1.0))
+            art = self.sprites.chassis(size, spec.chassis, robot.facing, spec.modules)
+            sx, sy = camera.world_to_screen(robot.x, robot.y)
+            target.blit(art, art.get_rect(center=(int(sx), int(sy))))
+
+    def _draw_robot_marks(self, target: pygame.Surface, sim: Simulation,
+                          camera: Camera) -> None:
+        """Над роботом: выделение, номер группы, прочность, патроны (plan/04)."""
+        scale = camera.scale
+        for robot in sim.robots.robots:
+            sx, sy = camera.world_to_screen(robot.x, robot.y)
+            if robot.id in self._selected:
+                pygame.draw.circle(target, theme.PLAYER, (int(sx), int(sy)),
+                                   int(scale * 0.55), 2)
+            if robot.group is not None:
+                mark = self.icons.mark_icon(str(robot.group), theme.PLAYER)
+                target.blit(mark, mark.get_rect(midbottom=(int(sx), int(sy - scale * 0.55))))
+            if robot.hp < robot.max_hp:
+                self._hp_bar(target, sx, sy + scale * 0.45, scale, robot.hp / robot.max_hp)
+            cap = ammo_capacity(robot.design) or carry_of(robot.design)
+            if cap:
+                have = robot.ammo if ammo_capacity(robot.design) else robot.cargo
+                w = max(10, int(scale * 0.8))
+                x, y = int(sx - w / 2), int(sy + scale * 0.58)
+                pygame.draw.rect(target, theme.OUTLINE, (x - 1, y - 1, w + 2, 4))
+                pygame.draw.rect(target, theme.SHOT_TURRET, (x, y, int(w * have / cap), 2))
+
     def _draw_combat(self, target: pygame.Surface, sim: Simulation,
                      camera: Camera) -> None:
         """Глаза врагов, следы выстрелов, полосы прочности, точка прорыва."""
+        self._draw_robot_marks(target, sim, camera)
         scale = camera.scale
         x0, y0, x1, y1 = camera.visible_tiles(margin=1)
         eye = max(2, int(scale * 0.16))
@@ -873,7 +911,8 @@ class Renderer:
             if enemy.hp < hp_max:
                 self._hp_bar(target, sx, sy - scale * 0.55, scale, enemy.hp / hp_max)
         colors = {SHOT_TURRET: theme.SHOT_TURRET, SHOT_DRONE: theme.SHOT_DRONE,
-                  SHOT_ENEMY: theme.SHOT_ENEMY, SHOT_ARTILLERY: theme.ARTILLERY_RING}
+                  SHOT_ENEMY: theme.SHOT_ENEMY, SHOT_ARTILLERY: theme.ARTILLERY_RING,
+                  "robot": theme.PLAYER, "supply": theme.OK}
         for shot in sim.enemies.shots:
             a = camera.world_to_screen(shot.x0, shot.y0)
             b = camera.world_to_screen(shot.x1, shot.y1)

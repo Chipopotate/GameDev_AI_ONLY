@@ -83,7 +83,7 @@ class Hud:
         self._panels: list[pygame.Rect] = []
 
     def draw(self, target: pygame.Surface, sim: Simulation, camera: Camera,
-             fps: float, window_open: bool = False) -> None:
+             fps: float, window_open: bool = False, selected: int = 0) -> None:
         """Панели HUD. Пауза рисуется отдельно (`draw_pause`) — поверх окон."""
         self._panels = []
         self._draw_status(target, sim, camera, fps)
@@ -94,7 +94,7 @@ class Hud:
             self._draw_controls(target)
         self._draw_toasts(target, sim)
         if not window_open:
-            self._draw_prompt(target, sim)
+            self._draw_prompt(target, sim, selected)
 
     def draw_defeat(self, target: pygame.Surface, sim: Simulation) -> None:
         """Экран поражения (M5): причина и точка прорыва — кольцо на карте."""
@@ -153,6 +153,7 @@ class Hud:
             f"Зум: {camera.zoom:.1f}x",
             f"Дрон: {max(0, int(sim.drone.hp))}/{config.DRONE_HP}",
             f"Врагов: {sim.enemies.count()}   убито: {sim.enemies.killed}",
+            f"Роботов: {len(sim.robots.robots)}",
             f"Добыто: {sim.mined_total}",
             f"Слот {sim.selected_slot + 1}: {self._slot_name(sim)}",
             # Энергия сети (M4): выработка/спрос. Если выработки меньше, часть
@@ -281,7 +282,8 @@ class Hud:
             y = rect.bottom + 4
 
     # ------------------------------------- подсказка у курсора
-    def _draw_prompt(self, target: pygame.Surface, sim: Simulation) -> None:
+    def _draw_prompt(self, target: pygame.Surface, sim: Simulation,
+                     selected: int = 0) -> None:
         """Что можно сделать с тем, на что смотрит игрок: залежь, реликвия, лаб.
 
         Приоритет тот же, что у симуляции: реликвия → залежь → брошенный предмет.
@@ -289,6 +291,11 @@ class Hud:
         сканировать) они перечисляются через запятую.
         """
         text, color = self._prompt_for(sim)
+        if selected:
+            # С выбранными роботами ПКМ — приказ (M7): подсказка об этом важнее.
+            text = (f"Роботов выбрано: {selected} — ПКМ: охранять / атаковать "
+                    f"(Shift — в очередь), F — за дроном, P — патруль, Esc — снять")
+            color = theme.PLAYER
         if text is None:
             return
         w = widgets.text_width(text, config.UI_FONT_SIZE) + 20

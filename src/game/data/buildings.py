@@ -40,6 +40,7 @@ ASSEMBLER = "assembler"
 GENERATOR = "generator"
 TURRET = "turret"
 WALL = "wall"
+WORKSHOP = "workshop"
 
 #: Роли контейнеров: куда конвейер кладёт и откуда берёт.
 PORT_IN = "in"          # принимает предметы (вход сборщика, образцы лаборатории)
@@ -51,6 +52,7 @@ PORT_FUEL = "fuel"      # топливо генератора
 WORK_MINE = "mine"
 WORK_MOVE = "move"
 WORK_CRAFT = "craft"
+WORK_ROBOT = "robot"    # мастерская: собирает робота из корпуса и модулей (M7)
 
 #: Контейнер лаборатории: слоты, в которые игрок (или конвейер) кладёт образцы.
 LAB_SAMPLES = "samples"
@@ -58,7 +60,7 @@ LAB_SAMPLES = "samples"
 #: Порядок построек: в нём предметы-постройки лежат в таблице забега (и в
 #: галерее). Клавиш «режима стройки» больше нет — постройка ставится из хотбара.
 BUILD_ORDER = (LAMP, LAB, DRILL, CONVEYOR, WIRE, STORAGE, ASSEMBLER, GENERATOR,
-               TURRET, WALL)
+               TURRET, WALL, WORKSHOP)
 
 #: На какой тайл ставится здание: свободная земля или залежь (бур).
 PLACE_GROUND = "ground"
@@ -188,7 +190,7 @@ class BuildingDef:
         """Контейнер, над которым здание работает само: по нему окно рисует прогресс."""
         if self.analyzes is not None:
             return self.analyzes
-        if self.work == WORK_CRAFT:
+        if self.work in (WORK_CRAFT, WORK_ROBOT):
             return self.input_id
         return None
 
@@ -275,6 +277,16 @@ BUILDING_TYPES: dict[str, BuildingDef] = {
         recipe=_item_recipe(WALL, ((Prop.TOUGH, 1),), 0.5),
         unlock_role=ROLE_STRUCTURE,
         hp=300, enemy_priority=1, chassis="static",
+    ),
+    # Мастерская (M7, plan/03): собирает робота (корпус + модули) из предметов
+    # ролей во входе; что собирать — выбирает игрок кнопкой в окне.
+    WORKSHOP: BuildingDef(
+        WORKSHOP, "Мастерская", "hexagon", (120, 200, 230),
+        containers=(ContainerDef("in", "Материалы", 6, 3, PORT_IN),),
+        work=WORK_ROBOT,
+        recipe=_item_recipe(WORKSHOP, ((Prop.TOUGH, 3), (Prop.CONDUCTIVE, 3)), 3.0),
+        unlock_role=ROLE_AUTOMATION,
+        hp=120, enemy_priority=9, needs_power=True, power_use=3.0,
     ),
 }
 

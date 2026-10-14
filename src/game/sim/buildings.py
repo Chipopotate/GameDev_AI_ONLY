@@ -34,7 +34,7 @@ import math
 from dataclasses import dataclass, field
 
 from src.game import config
-from src.game.data.buildings import (WORK_CRAFT, WORK_MINE, WORK_MOVE,
+from src.game.data.buildings import (WORK_CRAFT, WORK_MINE, WORK_MOVE, WORK_ROBOT,
                                      building as building_def)
 from src.game.data.recipes import Recipe, recipe as recipe_def
 from src.game.data.resources import Prop, ItemTable
@@ -470,6 +470,8 @@ class BuildingSystem:
             return self.statuses(building, knowledge)
         if definition.work == WORK_CRAFT:
             return ((_craft_status(building, items), building.work_progress),)
+        if definition.work == WORK_ROBOT:
+            return ((_robot_status(building), building.work_progress),)
         return ()
 
     # ---------------------------------------------------------- для тестов
@@ -505,5 +507,17 @@ def _craft_status(building: Building, items: ItemTable) -> str:
         return SLOT_POWER
     source = building.input
     if source is None or plan_craft(recipe_def(building.recipe), source, items) is None:
+        return CRAFT_ITEMS
+    return CRAFT_WORK
+
+
+def _robot_status(building: Building) -> str:
+    """Что делает мастерская: не выбран робот, не хватает материалов или сборка."""
+    from src.game.data.robots import design
+    if building.recipe is None:
+        return CRAFT_NONE
+    container = building.input
+    spec = design(building.recipe)
+    if container is None or not all(container.has(i, n) for i, n in spec.cost):
         return CRAFT_ITEMS
     return CRAFT_WORK

@@ -16,7 +16,9 @@ from src.game import config
 from src.game.render.camera import Camera
 from src.game.render.gallery import Gallery
 from src.game.render.renderer import Renderer
-from src.game.sim.commands import PlaceBuilding, SelectHotbar
+from src.game.sim.commands import OrderRobots, PlaceBuilding, SelectHotbar
+from src.game.sim.robots import (ORDER_ATTACK, ORDER_FOLLOW, ORDER_GUARD, ORDER_PATROL,
+                                 Order)
 from src.game.sim.simulation import Simulation
 from src.game.ui import fonts, widgets
 from src.game.ui.debug import DebugOverlay
@@ -65,6 +67,10 @@ class Game:
         self.debug = DebugOverlay()
         # Меню паузы на Esc (просьба автора): выход из игры — только его кнопкой.
         self.menu = PauseMenu()
+        #: Выбранные роботы (M7) и группы «номер → роботы». Это состояние
+        #: интерфейса: симуляция получает только приказы (`OrderRobots`).
+        self.selection: list[int] = []
+        self.groups: dict[int, list[int]] = {}
         # Галерея спрайтов (plan/09 §12): F4 — сравнить все формы на одном экране.
         self.gallery = Gallery(self.renderer.sprites, self.renderer.icons,
                                self.sim.run.items, seed=self.seed)
@@ -132,8 +138,8 @@ class Game:
 
     def ghost_tile(self) -> tuple[int, int] | None:
         """Тайл призрака постройки: только над картой и при закрытых окнах."""
-        if self.item_window.visible or self.gallery_visible:
-            return None
+        if self.item_window.visible or self.gallery_visible or self.selection:
+            return None                     # с выбранными роботами ПКМ — приказ
         mouse = pygame.mouse.get_pos()
         if self.hud.over_ui(mouse):
             return None
@@ -204,8 +210,78 @@ class Game:
         if self.hud.over_ui(pos):
             self._consume(event.button)
             return
+        if self._robot_click(pos, event.button, shift):
+            self._consume(event.button)
+            return
         if event.button == 3 and self.right_click_world(pos):
             self._consume(event.button)
+
+    # -------------------------------------------------------------- роботы
+    def _world_at(self, pos: tuple[int, int]) -> tuple[float, float]:
+        return self.camera.screen_to_world(*pos)
+
+    def _live_selection(self) -> list[int]:
+        """Выбранные роботы, которые ещё живы (погибшие выпадают сами)."""
+        alive = {r.id for r in self.sim.robots.robots}
+        self.selection = [i for i in self.selection if i in alive]
+        return self.selection
+
+    def _robot_click(self, pos: tuple[int, int], button: int, shift: bool) -> bool:
+        """ЛКМ по роботу — выбрать (Shift — добавить); ПКМ с выбором — приказ.
+
+        Приказ по ПКМ: враг под курсором — атаковать его, иначе охранять
+        точку. Shift ставит приказ в очередь (plan/04).
+        """
+        wx, wy = self._world_at(pos)
+        if button == 1:
+            robot = self.sim.robots.at(wx, wy)
+            if robot is not None:
+                if not shift:
+                    self.selection = []
+                if robot.id in self.selection:
+                    self.selection.remove(robot.id)
+                else:
+                    self.selection.append(robot.id)
+                return True
+            return False
+        selection = self._live_selection()
+        if button != 3 or not selection:
+            return False
+        enemy = self.sim.enemies.nearest(wx, wy, config.ROBOT_PICK_RADIUS + 0.2)
+        if enemy is not None:
+            order = Order(ORDER_ATTACK, target_id=enemy.id)
+        else:
+            order = Order(ORDER_GUARD, (wx, wy))
+        self.sim.apply(OrderRobots(tuple(selection), order, shift))
+        return True
+
+    def _robot_key(self, key: int) -> bool:
+        """Клавиши роботов: F, P, Ctrl+цифра (группа), Alt+цифра (выбор группы)."""
+        mods = pygame.key.get_mods()
+        if key in HOTBAR_KEYS and mods & (pygame.KMOD_CTRL | pygame.KMOD_ALT):
+            number = HOTBAR_KEYS[key] + 1
+            if mods & pygame.KMOD_CTRL:
+                ids = list(self._live_selection())
+                self.groups[number] = ids
+                for robot in self.sim.robots.robots:
+                    if robot.id in ids:
+                        robot.group = number
+                    elif robot.group == number:
+                        robot.group = None
+            else:
+                alive = {r.id for r in self.sim.robots.robots}
+                self.selection = [i for i in self.groups.get(number, []) if i in alive]
+            return True
+        selection = self._live_selection()
+        if not selection or key not in (pygame.K_f, pygame.K_p):
+            return False
+        shift = bool(mods & pygame.KMOD_SHIFT)
+        if key == pygame.K_f:
+            order = Order(ORDER_FOLLOW)
+        else:
+            order = Order(ORDER_PATROL, self._world_at(pygame.mouse.get_pos()))
+        self.sim.apply(OrderRobots(tuple(selection), order, shift))
+        return True
 
     def _consume(self, button: int) -> None:
         """Это нажатие уже что-то сделало: удержанием в мире оно не станет."""
@@ -251,8 +327,12 @@ class Game:
                 self.gallery_visible = False
             elif self.item_window.visible:
                 self.item_window.close(self.sim)
+            elif self._live_selection():
+                self.selection = []             # сначала снять выбор роботов
             else:
                 self.menu.visible = True
+        elif self._robot_key(key):
+            pass
         elif key == pygame.K_SPACE:
             self.paused = not self.paused
         elif key == pygame.K_e:
@@ -333,9 +413,11 @@ class Game:
         self.renderer.draw_world(self.screen, self.sim, self.camera,
                                  show_lit_layer=self.debug.show_layers, dt=anim_dt,
                                  ghost_tile=None if self.sim.defeated else self.ghost_tile(),
-                                 show_flow=self.debug.show_path)
+                                 show_flow=self.debug.show_path,
+                                 selected=self._live_selection())
         self.hud.draw(self.screen, self.sim, self.camera, self.fps,
-                      window_open=self.item_window.visible)
+                      window_open=self.item_window.visible,
+                      selected=len(self.selection))
         self.item_window.draw(self.screen, self.sim)
         self.hud.draw_hotbar(self.screen, self.sim,
                              tooltip=self.item_window.held is None)

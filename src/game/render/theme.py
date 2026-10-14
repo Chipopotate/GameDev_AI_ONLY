@@ -153,6 +153,7 @@ LASER_BLUE_CORE = rgb("#dff2ff")
 ACTION_COLORS: dict[str, Color] = {
     "mine": LASER_RED,
     "dismantle": LASER_RED,
+    "attack": LASER_RED,
     "study": LASER_BLUE,
     "scan": LASER_BLUE,
 }
@@ -161,6 +162,7 @@ ACTION_COLORS: dict[str, Color] = {
 ACTION_CORES: dict[str, Color] = {
     "mine": LASER_RED_CORE,
     "dismantle": LASER_RED_CORE,
+    "attack": LASER_RED_CORE,
     "study": LASER_BLUE_CORE,
     "scan": LASER_BLUE_CORE,
 }

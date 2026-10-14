@@ -31,6 +31,7 @@ import pygame
 from src.game import config
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR, LAB,
                                      STORAGE, building as building_def)
+from src.game.data.enemies import ENEMY_TYPES
 from src.game.data.relics import relic_def
 from src.game.data.terrain import Terrain
 from src.game.render import quality, theme
@@ -109,6 +110,11 @@ NO_POWER_BLINK_HZ = 1.2
 FILL_BAR_WIDTH = 0.60      # доля тайла под полоску заполнения склада
 BAR_WIDTH = 0.90           # доля тайла под полосу прогресса
 WATER_GLINT_ALPHA = 46     # плотность блика по воде, 0..255
+#: Заражение (M8): плотность активного и погасшего слоя, 0..255.
+INFECT_ACTIVE_ALPHA = 110
+INFECT_DEAD_ALPHA = 55
+SPROUT_SIZE = 1.6          # доля тайла под росток
+INCUBATOR_SIZE = 1.1       # и под инкубатор
 
 
 class Renderer:
@@ -126,6 +132,10 @@ class Renderer:
         # Блик по воде — **отдельный** слой: он анимирован, а тьма дискретна, и
         # складывать их в один слой значило бы перерисовывать тьму каждый кадр.
         self.water = TileOverlay()
+        # Заражение — свой потайловый слой (plan/09 §4): оно «дышит», а чанк
+        # рельефа статичен.
+        self.infection = TileOverlay()
+        self._world_version = world.version
         self.postfx = PostFX()
         self.particles = ParticlePool(0, self.sprites.factory)
         self.effects = EffectsDirector(self.particles, world.seed)
@@ -174,14 +184,21 @@ class Renderer:
                     show_lit_layer: bool) -> None:
         self.glows_drawn = 0
         self._marks.clear()
+        if self.world.version != self._world_version:
+            # Обвал гор (M8): рельеф изменился, чанки рисуются заново.
+            self._world_version = self.world.version
+            self.chunks.invalidate_all()
         self.chunks.draw(target, camera)
         self._draw_water_shimmer(target, camera)
+        self._draw_infection(target, camera, sim)
         self._draw_deposits(target, camera, sim)
         self._draw_relics(target, camera, sim)
         self._draw_buildings(target, camera, sim)
         self._draw_lamps(target, camera, sim)
+        self._draw_bases(target, camera, sim)
         self._draw_drops(target, camera, sim)
         self._draw_building_bars(target, camera, sim)
+        self._draw_enemies(target, camera, sim)
         self._draw_drone(target, sim, camera)
         self._draw_bars(target, sim, camera)
         # Тьма — поверх мира, но под интерфейсом.
@@ -230,6 +247,81 @@ class Renderer:
         alpha[iy0 - y0:iy1 - y0 + 1, ix0 - x0:ix1 - x0 + 1] = strength * WATER_GLINT_ALPHA
         rgba[..., 3] = alpha.astype(np.uint8)
         self.water.draw(target, camera, x0, y0, rgba, smooth=True)
+
+    # ------------------------------------------------- заражение и враги (M8)
+    def _draw_infection(self, target: pygame.Surface, camera: Camera,
+                        sim: Simulation) -> None:
+        """Слой заражения: живое — пульсирующий пурпур, погасшее — бурый след."""
+        x0, y0, x1, y1 = camera.visible_tiles(margin=1)
+        ix0, iy0 = max(x0, 0), max(y0, 0)
+        ix1, iy1 = min(x1, self.world.width - 1), min(y1, self.world.height - 1)
+        if ix0 > ix1 or iy0 > iy1:
+            return
+        infected = sim.bases.infected[iy0:iy1 + 1, ix0:ix1 + 1]
+        if not infected.any():
+            return
+        active = sim.bases.active[iy0:iy1 + 1, ix0:ix1 + 1]
+        h, w = y1 - y0 + 1, x1 - x0 + 1
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        block = rgba[iy0 - y0:iy1 - y0 + 1, ix0 - x0:ix1 - x0 + 1]
+        pulse = 0.85 + 0.15 * math.sin(self.anim_time * 2.0)
+        dead = infected & ~active
+        block[dead, :3] = theme.INFECT_DARK
+        block[dead, 3] = INFECT_DEAD_ALPHA
+        block[active, :3] = theme.INFECT_MID
+        block[active, 3] = int(INFECT_ACTIVE_ALPHA * pulse)
+        self.infection.draw(target, camera, x0, y0, rgba, smooth=True)
+
+    def _draw_bases(self, target: pygame.Surface, camera: Camera,
+                    sim: Simulation) -> None:
+        """Ростки и инкубаторы: органика из `sprites/organic.py` и полоска здоровья."""
+        x0, y0, x1, y1 = camera.visible_tiles(margin=2)
+        tile = config.TILE * camera.zoom
+        phase = self.anim_time * 2.4
+        for sprout in sim.bases.live:
+            for inc in sprout.incubators:
+                if x0 <= inc.x <= x1 and y0 <= inc.y <= y1:
+                    self._draw_creature(target, camera, "incubator", inc.x + 0.5,
+                                        inc.y + 0.5, tile * INCUBATOR_SIZE, phase + inc.id)
+                    self._hp_bar(target, camera, inc, tile * INCUBATOR_SIZE)
+            if x0 <= sprout.x <= x1 and y0 <= sprout.y <= y1:
+                self._draw_creature(target, camera, "sprout", sprout.x + 0.5,
+                                    sprout.y + 0.5, tile * SPROUT_SIZE, phase)
+                self._hp_bar(target, camera, sprout, tile * SPROUT_SIZE)
+
+    def _hp_bar(self, target, camera: Camera, obj, size: float) -> None:
+        if obj.hp < obj.max_hp:
+            self._progress_bar(target, camera, obj.x + 0.5, obj.y + 0.5,
+                               obj.hp / obj.max_hp, theme.FOE_BLOOD, dy=int(size * 0.5) + 4)
+
+    def _draw_creature(self, target, camera: Camera, kind: str, wx: float, wy: float,
+                       size: float, phase: float) -> None:
+        sprite = self.sprites.creature(kind, max(8, int(size)), phase)
+        sx, sy = camera.world_to_screen(wx, wy)
+        target.blit(sprite, sprite.get_rect(center=(int(sx), int(sy))))
+
+    def _draw_enemies(self, target: pygame.Surface, camera: Camera,
+                      sim: Simulation) -> None:
+        """Враги и луч оружия дрона по цели (M8)."""
+        x0, y0, x1, y1 = camera.visible_tiles(margin=2)
+        tile = config.TILE * camera.zoom
+        for enemy in sim.enemies.enemies:
+            if not (x0 <= enemy.x <= x1 + 1 and y0 <= enemy.y <= y1 + 1):
+                continue
+            etype = ENEMY_TYPES[enemy.kind]
+            size = tile * etype.size
+            self._draw_creature(target, camera, etype.sprite, enemy.x, enemy.y, size,
+                                self.anim_time * 3.0 + enemy.id)
+            if enemy.hp < enemy.max_hp:
+                self._progress_bar(target, camera, enemy.x, enemy.y,
+                                   enemy.hp / enemy.max_hp, theme.FOE_BLOOD,
+                                   dy=int(size * 0.5) + 2)
+        action = sim.drone.action
+        if action.kind == "attack" and action.target_world_pos is not None:
+            start = camera.world_to_screen(sim.drone.x, sim.drone.y)
+            end = camera.world_to_screen(*action.target_world_pos)
+            pygame.draw.line(target, theme.laser_color(action.kind), start, end,
+                             max(2, int(tile * 0.08)))
 
     # ------------------------------------------------------------- залежи
     def _draw_deposits(self, target: pygame.Surface, camera: Camera,
@@ -343,6 +435,10 @@ class Renderer:
         for building in sim.buildings.buildings:
             if not (x0 <= building.x <= x1 and y0 <= building.y <= y1):
                 continue
+            hurt = sim.structure_damage(building.x, building.y)
+            if hurt > 0.0:
+                self._progress_bar(target, camera, building.x + 0.5, building.y + 0.5,
+                                   1.0 - hurt, theme.FOE_BLOOD, dy=-int(size * 0.5) - 8)
             progress = building.bar_progress
             if progress > 0.0:
                 self._progress_bar(target, camera, building.x + 0.5,

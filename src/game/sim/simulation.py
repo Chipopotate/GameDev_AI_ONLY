@@ -32,6 +32,8 @@ import random
 from collections import deque
 from dataclasses import dataclass
 
+import numpy as np
+
 from src.game import config
 from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES, BUILD_ORDER,
                                      LAB, LAMP, PLACE_DEPOSIT, WORK_CRAFT,
@@ -39,8 +41,11 @@ from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES, BUILD_ORDER
                                      unlocked_by)
 from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
 from src.game.data.resources import PROP_NAMES, Prop
+from src.game.data.enemies import INCUBATOR_TYPES, SHADOW
+from src.game.sim.bases import BaseSystem, Incubator, Sprout
 from src.game.sim.buildings import DIRECTIONS, Building, BuildingSystem, CraftResult
 from src.game.sim.drops import DropSystem
+from src.game.sim.enemies import Enemy, EnemySystem
 from src.game.sim.light import Lamp, LightSystem
 from src.game.sim.power import PowerNode, PowerSystem
 from src.game.sim.research import Knowledge, plan_craft
@@ -48,9 +53,17 @@ from src.game.sim.resources import (Cargo, Hotbar, Inventory, Stack, give,
                                     transfer)
 from src.game.sim.run_gen import Relic, RunPlan, generate_run
 from src.game.sim.time_cycle import EVENT_DAWN, EVENT_DUSK, TimeCycle
-from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_SCAN,
-                                ACTION_STUDY, Drone, DroneAction)
-from src.game.sim.world import Deposit, World
+from src.game.sim.units import (ACTION_ATTACK, ACTION_DISMANTLE, ACTION_MINE,
+                                ACTION_SCAN, ACTION_STUDY, Drone, DroneAction)
+from src.game.sim.world import COLLAPSE_SIDES, Deposit, World
+
+#: Достижения за частичную победу (plan/00). Выдаются тостом в момент выполнения.
+ACHIEVEMENT_LIT = "lit_all"
+ACHIEVEMENT_SPROUTS = "sprouts_dead"
+ACHIEVEMENT_TEXT = {
+    ACHIEVEMENT_LIT: "Достижение: освещено всё, но ростки остались",
+    ACHIEVEMENT_SPROUTS: "Достижение: ростков нет, но осталась тьма",
+}
 
 #: Что можно построить. Порядок — порядок строк в данных.
 BUILD_LAMP = LAMP
@@ -136,6 +149,19 @@ class Simulation:
         self.time_cycle = TimeCycle()
         self.light = LightSystem(self.world)
         self.power = PowerSystem()
+        # Ростки, враги и обвал гор (M8): у каждого свой поток случайности.
+        self.bases = BaseSystem(self.world, random.Random(seed ^ config.BASES_SALT))
+        self.bases.generate(self._base_blocked)
+        self.enemies = EnemySystem(self.world, random.Random(seed ^ config.ENEMY_SALT))
+        self._collapse_plan = self.world.plan_collapses(
+            random.Random(seed ^ config.BASES_SALT ^ 0x1), config.COLLAPSE_PLANNED)
+        self.collapses_done = 0
+        # Урон по постройкам: тайл → сколько уже снято (hp — в данных здания).
+        self._structure_damage: dict[tuple[int, int], float] = {}
+        self._shadow_timer = config.SHADOW_SPAWN_INTERVAL
+        self.attack_target: Enemy | Sprout | Incubator | None = None
+        self.achievements: set[str] = set()
+        self.boss_spawned = False
 
         self.time = 0.0
         self.move_input: tuple[float, float] = (0.0, 0.0)
@@ -256,7 +282,10 @@ class Simulation:
         # у него энергия (M4). Топливо горит уже после пересчёта — по спросу.
         self._update_power(dt)
         self._update_buildings(dt)
+        self._update_respawns(dt)
+        self._update_enemies(dt)
         self._update_drops(dt)
+        self._check_victory()
         self._update_toasts(dt)
 
     def _update_time(self, dt: float) -> None:
@@ -264,8 +293,10 @@ class Simulation:
         for event in self.time_cycle.update(dt):
             if event == EVENT_DUSK:
                 self.toast(f"Ночь {self.time_cycle.day_number}")
+                self._on_dusk()
             elif event == EVENT_DAWN:
                 self.toast(f"День {self.time_cycle.day_number}")
+                self._on_dawn()
 
     # ---------------------------------------------------- работа руками
     def _update_actions(self, dt: float) -> None:
@@ -274,6 +305,7 @@ class Simulation:
             self._reset_mining()
             self._reset_study()
             self._reset_dismantle()
+            self.attack_target = None
             return
         relic = self.cursor_relic
         # Реликвия важнее: она не может стоять на залежи, так что выбор
@@ -283,6 +315,15 @@ class Simulation:
             self._reset_dismantle()
             self._update_study(dt, relic)
             return
+        # Враг, росток или инкубатор под курсором — слабое оружие дрона (M8).
+        target = self.attack_candidate()
+        if target is not None:
+            self._reset_mining()
+            self._reset_study()
+            self._reset_dismantle()
+            self._update_attack(dt, target)
+            return
+        self.attack_target = None
         # Своя постройка важнее залежи: бур стоит **на** залежи, и «добыть
         # сквозь бур» — это точно не то, чего хотел игрок.
         if self.dismantle_candidate() is not None:
@@ -431,7 +472,15 @@ class Simulation:
         Луч лазера рисуется ровно тогда, когда здесь не None, поэтому таблица
         «действие → цвет» живёт в `render/theme.py`, а не размазана по рендеру.
         """
-        if self.study_target is not None:
+        if self.attack_target is not None:
+            target = self.attack_target
+            if isinstance(target, Enemy):
+                pos = (target.x, target.y)
+            else:
+                pos = (target.x + 0.5, target.y + 0.5)
+            self.drone.action = DroneAction(ACTION_ATTACK, pos,
+                                            1.0 - max(0.0, target.hp) / target.max_hp)
+        elif self.study_target is not None:
             relic = self.study_target
             self.drone.action = DroneAction(ACTION_STUDY,
                                             (relic.x + 0.5, relic.y + 0.5),
@@ -910,6 +959,8 @@ class Simulation:
             return False
         if self.run.relic_at(x, y) is not None:
             return False
+        if self.bases.at(x, y) is not None:
+            return False
         deposit = self.world.deposit_at(x, y)
         if building_def(kind).placeable_on == PLACE_DEPOSIT:
             # Бур ставится **на** залежь: он добывает из неё сам (plan/03).
@@ -987,6 +1038,7 @@ class Simulation:
     def _spawn(self, kind: str, x: int, y: int,
                direction: tuple[int, int]) -> Building | Lamp | None:
         """Ставит само здание: лампа живёт в `sim/light.py`, остальные — в `sim/buildings.py`."""
+        self._structure_damage.pop((x, y), None)
         if kind == BUILD_LAMP:
             # Лампа ставится **выключенной**: с M4 она горит, только пока её
             # питает сеть, и решение принимает `_update_power` на ближайшем шаге.
@@ -1058,6 +1110,221 @@ class Simulation:
         self.toast(f"Сборщик: {role_def(self.run.recipe(building.recipe).role).short}")
         return building.recipe
 
+    # ------------------------------------------------- ростки и враги (M8)
+    def _base_blocked(self, x: int, y: int) -> bool:
+        """Занят ли тайл для ростка или инкубатора: реликвия, постройка, лампа."""
+        return (self.run.relic_at(x, y) is not None or self.buildings.at(x, y) is not None
+                or self.light.lamp_at(x, y) is not None)
+
+    def _on_dusk(self) -> None:
+        """Перед ночью: рост баз (plan/06), затем вылупление из инкубаторов."""
+        day = self.time_cycle.day_number
+        if self.bases.live:
+            self.bases.grow(day, self._base_blocked)
+        for inc in list(self.bases.incubators()):
+            enemy = INCUBATOR_TYPES[inc.kind].enemy
+            self.enemies.spawn_around(enemy, inc.x, inc.y, inc.spawn_count, day)
+        self._shadow_timer = config.SHADOW_SPAWN_INTERVAL
+
+    def _on_dawn(self) -> None:
+        day = self.time_cycle.day_number
+        if config.SHADOWS_FADE_AT_DAWN:
+            for enemy in [e for e in self.enemies.enemies if e.kind == SHADOW]:
+                self.enemies.enemies.remove(enemy)
+        # Обвал гор (plan/01): день 3 — первый проход, дальше каждые N дней.
+        first, every = config.COLLAPSE_FIRST_DAY, config.COLLAPSE_EVERY_DAYS
+        if day >= first and (day - first) % every == 0:
+            for _ in range(config.COLLAPSE_PER_EVENT):
+                self.collapse_next()
+
+    def collapse_next(self) -> bool:
+        """Следующий заранее выбранный участок обвала. False — участки кончились."""
+        if self.collapses_done >= len(self._collapse_plan):
+            return False
+        side, offset = self._collapse_plan[self.collapses_done]
+        self.collapses_done += 1
+        if not self.world.collapse(side, offset):
+            return False
+        self.toast(f"Обвал гор: открыт проход на {COLLAPSE_SIDES[side][1]}")
+        return True
+
+    def _update_enemies(self, dt: float) -> None:
+        if self.time_cycle.is_night:
+            self._shadow_timer -= dt
+            if self._shadow_timer <= 0.0:
+                self._shadow_timer = config.SHADOW_SPAWN_INTERVAL
+                tile = self._shadow_tile()
+                if tile is not None:
+                    self.enemies.spawn(SHADOW, tile[0] + 0.5, tile[1] + 0.5,
+                                       self.time_cycle.day_number)
+        hits = self.enemies.update(dt, self._enemy_structures,
+                                   (self.drone.x, self.drone.y))
+        for tile, damage in hits:
+            self._hit_structure(tile, damage)
+
+    def _shadow_tile(self) -> tuple[int, int] | None:
+        """Тёмный доступный тайл около дрона: только там рождаются Тени (plan/05)."""
+        rng = self.enemies.rng
+        reachable = self.light.reachable
+        for _ in range(config.SHADOW_SPAWN_TRIES):
+            a = rng.random() * math.tau
+            r = config.SHADOW_SPAWN_MIN_DIST + rng.random() * (
+                config.SHADOW_SPAWN_RADIUS - config.SHADOW_SPAWN_MIN_DIST)
+            x = int(math.floor(self.drone.x + math.cos(a) * r))
+            y = int(math.floor(self.drone.y + math.sin(a) * r))
+            if not self.world.in_bounds(x, y) or not reachable[y, x]:
+                continue
+            if self.light.is_lit(x, y):
+                continue
+            return x, y
+        return None
+
+    def _enemy_structures(self) -> dict[tuple[int, int], str]:
+        out = {(b.x, b.y): b.kind for b in self.buildings.buildings}
+        for lamp in self.light.lamps:
+            out[(lamp.x, lamp.y)] = BUILD_LAMP
+        return out
+
+    def _hit_structure(self, tile: tuple[int, int], damage: float) -> None:
+        lamp = self.light.lamp_at(*tile)
+        building = None if lamp is not None else self.buildings.at(*tile)
+        if lamp is None and building is None:
+            return
+        kind = BUILD_LAMP if lamp is not None else building.kind
+        taken = self._structure_damage.get(tile, 0.0) + damage
+        if taken < building_def(kind).hp:
+            self._structure_damage[tile] = taken
+            return
+        self._structure_damage.pop(tile, None)
+        if lamp is not None:
+            self.light.remove_lamp(lamp)
+        else:
+            self.demolish(building)
+        self.toast(f"Враги разрушили: {building_def(kind).name}")
+
+    def structure_damage(self, x: int, y: int) -> float:
+        """Доля снятого здоровья постройки, 0..1 — для полосы над ней."""
+        taken = self._structure_damage.get((x, y))
+        if not taken:
+            return 0.0
+        lamp = self.light.lamp_at(x, y)
+        building = None if lamp is not None else self.buildings.at(x, y)
+        kind = BUILD_LAMP if lamp is not None else (building.kind if building else None)
+        return min(1.0, taken / building_def(kind).hp) if kind else 0.0
+
+    # --------------------------------------------------- оружие дрона (M8)
+    def attack_candidate(self) -> Enemy | Sprout | Incubator | None:
+        """Что под курсором можно бить: враг рядом с курсором, росток или инкубатор."""
+        tile = self.cursor_tile
+        if tile is None:
+            return None
+        cx, cy = tile[0] + 0.5, tile[1] + 0.5
+        enemy = self.enemies.at(cx, cy, config.ENEMY_PICK_RADIUS)
+        if enemy is not None:
+            if math.hypot(enemy.x - self.drone.x, enemy.y - self.drone.y) \
+                    <= config.DRONE_ATTACK_RANGE:
+                return enemy
+            return None
+        base = self.bases.at(*tile)
+        if base is not None and \
+                self.drone.distance_to_tile(base.x, base.y) <= config.DRONE_ATTACK_RANGE:
+            return base
+        return None
+
+    def _update_attack(self, dt: float, target: Enemy | Sprout | Incubator) -> None:
+        self.attack_target = target
+        damage = config.DRONE_DPS * dt
+        if isinstance(target, Enemy):
+            target.hp -= damage
+            if target.hp <= 0:
+                self.enemies.remove(target)
+                self.attack_target = None
+            return
+        if not self.bases.damage(target, damage):
+            return
+        self.attack_target = None
+        if isinstance(target, Sprout):
+            self._on_sprout_killed(target)
+        else:
+            self.toast("Инкубатор уничтожен")
+
+    def _on_sprout_killed(self, sprout: Sprout) -> None:
+        self.toast("Росток уничтожен")
+        if not config.SPROUT_RESPAWN:
+            return
+        cycle = self.time_cycle
+        days = self.bases.rng.uniform(*config.SPROUT_RESPAWN_DAYS)
+        target = self._respawn_tile()
+        self.bases.schedule_respawn(days * (cycle.day_length + cycle.night_length), target)
+        if target is not None:
+            dx, dy = target[0] - sprout.x, target[1] - sprout.y
+            side = (1 if dx > 0 else 3) if abs(dx) >= abs(dy) else (2 if dy > 0 else 0)
+            self.toast(f"Споры летят на {COLLAPSE_SIDES[side][1]}")
+        else:
+            self.toast("Споры летят…")
+
+    def _respawn_tile(self) -> tuple[int, int] | None:
+        """Тёмный доступный тайл для нового ростка (plan/06: только тьма)."""
+        mask = self.light.reachable & ~self.light.lit
+        ys, xs = np.nonzero(mask)
+        if len(xs) == 0:
+            return None
+        rng = self.bases.rng
+        for _ in range(40):
+            i = rng.randrange(len(xs))
+            x, y = int(xs[i]), int(ys[i])
+            if self._respawn_tile_ok(x, y):
+                return x, y
+        return None
+
+    def _respawn_tile_ok(self, x: int, y: int) -> bool:
+        if not self.light.reachable[y, x] or self.light.is_lit(x, y):
+            return False
+        if self.drone.distance_to_tile(x, y) < config.SPROUT_RESPAWN_MIN_DRONE_DIST:
+            return False
+        return (self.world.deposit_at(x, y) is None and self.bases.at(x, y) is None
+                and not self._base_blocked(x, y))
+
+    def _update_respawns(self, dt: float) -> None:
+        for respawn in list(self.bases.respawns):
+            respawn.timer -= dt
+            if respawn.timer > 0.0:
+                continue
+            self.bases.respawns.remove(respawn)
+            tile = respawn.target
+            if tile is None or not self._respawn_tile_ok(*tile):
+                tile = self._respawn_tile()
+            if tile is None:
+                self.toast("Спорам негде прорасти")
+                continue
+            self.bases.add_sprout(tile[0], tile[1], config.SPROUT_START_INCUBATORS[0],
+                                  self.time_cycle.day_number, self._base_blocked)
+            self.toast("Вырос новый росток")
+
+    def _check_victory(self) -> None:
+        """Победа (plan/06): освещено всё доступное и ростков нет → босс.
+
+        Достижения за частичную победу — тостом в момент выполнения (plan/00 ❓2).
+        """
+        if self.boss_spawned or not self.bases.sprouts:
+            return
+        all_lit = self.light.lit_ratio() >= config.VICTORY_LIT_RATIO - 1e-9
+        no_sprouts = not self.bases.live
+        if all_lit and not no_sprouts:
+            self._achieve(ACHIEVEMENT_LIT)
+        if no_sprouts and not all_lit:
+            self._achieve(ACHIEVEMENT_SPROUTS)
+        if all_lit and no_sprouts:
+            # Всё доступное освещено — спорам негде прорасти.
+            self.bases.respawns.clear()
+            self.boss_spawned = True
+            self.toast("Появился босс")
+
+    def _achieve(self, key: str) -> None:
+        if key not in self.achievements:
+            self.achievements.add(key)
+            self.toast(ACHIEVEMENT_TEXT[key])
+
     # --------------------------------------------------------------- события
     def toast(self, text: str) -> None:
         self.toasts.append(Toast(text, config.TOAST_TTL, config.TOAST_TTL))
@@ -1096,6 +1363,9 @@ class Simulation:
             tuple((r.id, r.x, r.y, r.studied) for r in self.run.relics),
             self.scans_done,
             self.crafted_total,
+            self.world.version,
+            self.bases.state(),
+            self.enemies.state(),
         )
 
     @property

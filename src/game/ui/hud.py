@@ -110,6 +110,9 @@ class Hud:
             (head, theme.ACCENT if night else theme.UI_TEXT),
             (left, theme.UI_TEXT_DIM),
             (f"освещено {sim.tiles_lit_ratio * 100:.0f}%", theme.LIGHT_ACCENT),
+            # M8: сколько баз осталось до победы и сколько врагов на карте.
+            (f"ростков {len(sim.bases.live)} · врагов {len(sim.enemies.enemies)}",
+             theme.UI_TEXT_DIM),
         )
         w = TIME_PANEL_W
         h = len(lines) * 18 + 12

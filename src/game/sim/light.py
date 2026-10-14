@@ -47,9 +47,10 @@ class LightSystem:
         self._lit = np.zeros((world.height, world.width), dtype=bool)
         self._dirty = True
         # «Доступные тайлы» — проходимая земля, связанная с точкой старта.
-        # Считается один раз: до обвала гор (M8) карта не меняется.
+        # Считается один раз на версию рельефа: меняет её только обвал гор (M8).
         self._reachable: np.ndarray | None = None
         self._reachable_count = 0
+        self._reachable_version = world.version
 
     # --------------------------------------------------------------- лампы
     def add_lamp(self, x: int, y: int, radius: float | None = None,
@@ -111,8 +112,9 @@ class LightSystem:
 
     @property
     def reachable(self) -> np.ndarray:
-        """Маска доступных тайлов (H, W), bool. Считается один раз."""
-        if self._reachable is None:
+        """Маска доступных тайлов (H, W), bool. Пересчёт — только после обвала гор."""
+        if self._reachable is None or self._reachable_version != self.world.version:
+            self._reachable_version = self.world.version
             self._reachable = self._compute_reachable()
             self._reachable_count = int(np.count_nonzero(self._reachable))
         return self._reachable

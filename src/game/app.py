@@ -16,7 +16,7 @@ from src.game import config
 from src.game.render.camera import Camera
 from src.game.render.gallery import Gallery
 from src.game.render.renderer import Renderer
-from src.game.sim.simulation import BUILDINGS, Simulation
+from src.game.sim.simulation import Simulation
 from src.game.ui import fonts, widgets
 from src.game.ui.debug import DebugOverlay
 from src.game.ui.hud import Hud
@@ -26,8 +26,8 @@ from src.game.ui.recipe_book import RecipeBook
 # Допуск при сравнении накопленного времени с шагом симуляции.
 TICK_EPS = 1e-9
 
-#: Клавиши выбора постройки: 1, 2, … по порядку `sim.BUILDINGS`.
-BUILD_KEYS = {pygame.K_1 + i: kind for i, kind in enumerate(BUILDINGS)}
+#: Клавиши 1…9 — слот панели быстрого доступа: из него ставится постройка.
+HOTBAR_KEYS = {pygame.K_1 + i: i for i in range(config.HOTBAR_SLOTS)}
 
 
 class Game:
@@ -105,11 +105,18 @@ class Game:
         return int(math.floor(wx)), int(math.floor(wy))
 
     def click_world(self, pos: tuple[int, int] | None = None) -> None:
-        """ЛКМ по миру: снести постройку или поставить выбранную (клавиши 1…8).
+        """ПКМ по земле: поставить постройку из выбранного слота хотбара.
 
-        Цену постройки списывает симуляция: приложение только сообщает тайл.
+        ЛКМ отдельной команды не имеет: добыча, изучение, демонтаж и выстрел —
+        это зажатая кнопка (`poll_input`). Предмет списывает симуляция.
         """
-        self.sim.click_at(*self.tile_at_screen(pos))
+        tile = self.tile_at_screen(pos)
+        kind = self.sim.selected_building()
+        # ПКМ по залежи — это скан: «здесь не построить» не нужно.
+        if kind is None or (self.sim.world.deposit_at(*tile) is not None
+                            and not self.sim.can_place(kind, *tile)):
+            return
+        self.sim.place_building(self.sim.selected_slot, tile)
 
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
@@ -137,16 +144,17 @@ class Game:
             shift = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
             self.item_window.click(pos, event.button, self.sim, shift=shift)
         elif event.button == 1:
-            if not self.book.click(pos, self.sim):
-                self.click_world(pos)
-        else:
-            self.open_container_at(pos)
+            self.book.click(pos, self.sim)
+        elif not self.open_container_at(pos):
+            self.click_world(pos)
 
     def open_container_at(self, pos: tuple[int, int]) -> bool:
         """ПКМ по зданию: открыть его контейнеры (склад, сборщик, бур, лаборатория)."""
         building = self.sim.buildings.at(*self.tile_at_screen(pos))
-        if building is None or not building.containers:
+        if building is None:
             return False
+        if not building.containers:
+            return True
         if not self.sim.building_reachable(building):
             self.sim.toast("Слишком далеко до здания")
             return False
@@ -184,8 +192,8 @@ class Game:
             # а T исправляет промах, не требуя сносить и ставить заново.
             if not self.sim.rotate_at(*self.tile_at_screen(None)):
                 self.sim.toast("Поворачивать нечего")
-        elif key in BUILD_KEYS:
-            self.sim.select_build(BUILD_KEYS[key])
+        elif key in HOTBAR_KEYS:
+            self.sim.select_hotbar(HOTBAR_KEYS[key])
         elif key == pygame.K_F1:
             self.debug.toggle("f1")
         elif key == pygame.K_F2:

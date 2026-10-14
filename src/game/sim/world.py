@@ -14,6 +14,11 @@ from src.game.data.resources import ItemTable
 from src.game.data.terrain import Terrain, terrain_type
 
 
+#: Стороны обвала: шаг наружу и название для сообщения.
+COLLAPSE_SIDES: tuple[tuple[tuple[int, int], str], ...] = (
+    ((0, -1), "север"), ((1, 0), "восток"), ((0, 1), "юг"), ((-1, 0), "запад"))
+
+
 @dataclass
 class Deposit:
     """Залежь ресурса на одном тайле."""
@@ -34,7 +39,8 @@ class World:
 
     Слои: `terrain` (int8), `deposit_id` (int32, -1 = нет залежи).
     Мир про освещённость ничего не знает: слой света живёт в `sim/light.py`,
-    заражение появится там же на M8.
+    заражение — в `sim/bases.py`. Рельеф меняется только обвалом гор (M8):
+    тогда растёт `version`, и кэши рельефа (свет, чанки) пересчитываются.
     """
 
     def __init__(
@@ -59,6 +65,7 @@ class World:
             from src.game.sim.run_gen import generate_run
             items = generate_run(seed).items
         self.items = items
+        self.version = 0         # растёт при каждом обвале гор (M8)
 
     # ------------------------------------------------------------ генерация
     @classmethod
@@ -340,6 +347,56 @@ class World:
     def _in_rect(x: int, y: int, rect: tuple[int, int, int, int]) -> bool:
         rx, ry, rw, rh = rect
         return rx <= x < rx + rw and ry <= y < ry + rh
+
+    # --------------------------------------------------------- обвал гор (M8)
+    def plan_collapses(self, rng: random.Random, count: int) -> list[tuple[int, int]]:
+        """Заранее выбранные участки обвала (plan/01): (сторона, сдвиг вдоль края).
+
+        Стороны идут по кругу в случайном порядке, чтобы первые проходы
+        открывали разные стороны карты, а не одну и ту же.
+        """
+        sides = list(range(len(COLLAPSE_SIDES)))
+        rng.shuffle(sides)
+        margin = 3
+        top = max(margin, self.start_rect[2] - margin - config.COLLAPSE_WIDTH)
+        return [(sides[i % len(sides)], rng.randint(margin, top)) for i in range(count)]
+
+    def collapse(self, side: int, offset: int) -> list[tuple[int, int]]:
+        """Обрушивает горы: прямой проход шириной 🔧 `COLLAPSE_WIDTH` из зоны наружу.
+
+        Проход идёт от края стартовой зоны сквозь кольцо, пока не выйдет на
+        землю снаружи: вся земля вне кольца связна (`_connect_outside`), так что
+        одного выхода хватает, чтобы открыть всю внешнюю карту. Вода на пути
+        тоже засыпается — иначе проход мог бы упереться в озеро.
+        """
+        dx, dy = COLLAPSE_SIDES[side][0]
+        sx, sy, sw, sh = self.start_rect
+        if dy != 0:
+            bx, by = sx + offset, (sy if dy < 0 else sy + sh - 1)
+            ax, ay = 1, 0
+        else:
+            bx, by = (sx if dx < 0 else sx + sw - 1), sy + offset
+            ax, ay = 0, 1
+        ground = int(Terrain.GROUND)
+        carved: list[tuple[int, int]] = []
+        for step in range(1, config.COLLAPSE_MAX_LENGTH + 1):
+            cx, cy = bx + dx * step, by + dy * step
+            if not self.in_bounds(cx, cy):
+                break
+            was_open = True
+            for k in range(config.COLLAPSE_WIDTH):
+                tx, ty = cx + ax * k, cy + ay * k
+                if not self.in_bounds(tx, ty):
+                    continue
+                if self.terrain[ty, tx] != ground:
+                    was_open = False
+                    self.terrain[ty, tx] = ground
+                    carved.append((tx, ty))
+            if was_open and step > config.MOUNTAIN_RING_THICKNESS:
+                break
+        if carved:
+            self.version += 1
+        return carved
 
     # ------------------------------------------------------------- запросы
     def in_bounds(self, x: int, y: int) -> bool:

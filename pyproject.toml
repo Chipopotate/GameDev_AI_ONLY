@@ -1,0 +1,14 @@
+[project]
+name = "svet"
+version = "0.1.0"
+description = "Свет — 2D рогалик + автоматизация + защита базы (pygame-ce)"
+requires-python = ">=3.11"
+dependencies = ["pygame-ce>=2.5", "numpy>=1.26"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: долгие тесты (генерация на много seed)",
+]

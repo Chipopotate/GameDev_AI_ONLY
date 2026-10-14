@@ -1,12 +1,15 @@
-"""Экономика M4 (plan/02, plan/03): сеть, цены, бур, конвейер, склад, сборщик.
+"""Экономика M4 (plan/02, plan/03): сеть, постройки-предметы, бур, конвейер, склад, сборщик.
 
 Приёмка этапа: «бур → конвейер → склад работает, лампа питается от генератора,
-ресурсы тратятся по рецептам ролей». Каждый пункт проверяется там, где он живёт:
+ресурсы тратятся по рецептам». Каждый пункт проверяется там, где он живёт:
 
 - чистая сеть — `sim/power.py`, узлами и без мира;
-- цены, дальность и место — `Simulation.build` с настоящим инвентарём;
+- цена постройки — рецепт её предмета («свойство × количество»): крафт тратит
+  ресурсы, постановка — ровно один предмет из хотбара (`PlaceBuilding`);
+- дальность и место — `Simulation.can_place` / `Simulation.build`;
 - работа зданий — через `sim.update`, то есть так, как это увидит игрок;
-- данные зданий — на то, что цена ссылается на существующие предметы ролей.
+- данные зданий — на то, что рецепт ссылается на свойства, а предмет-постройка
+  есть в забеге и ставит именно своё здание.
 
 Сцена логистики — плоский мир с одной залежью (`make_world`): на настоящей карте
 залежь под бур ещё надо найти, а тест должен падать от поломки логики, а не от
@@ -20,16 +23,20 @@ import pytest
 from src.game import config
 from src.game.data.buildings import (ASSEMBLER, BUILD_ORDER, CONVEYOR, DRILL,
                                      GENERATOR, LAB, LAMP, PORT_FUEL, PORT_IN,
-                                     PORT_OUT, PORT_STORE, STORAGE, WIRE,
+                                     PORT_OUT, PORT_STORE, ROLE_AUTOMATION,
+                                     ROLE_ENERGY, ROLE_STRUCTURE, STORAGE, WIRE,
                                      WORK_CRAFT, building as building_def)
 from src.game.data.recipes import ROLES, recipe as recipe_def
-from src.game.data.resources import Prop
+from src.game.data.resources import PROP_NAMES, Prop
 from src.game.data.terrain import Terrain
 from src.game.sim.buildings import DIRECTIONS, _is_fuel
+from src.game.sim.commands import DismantleBuilding, PlaceBuilding, SelectHotbar
 from src.game.sim.power import PowerNode, PowerSystem
+from src.game.sim.research import plan_craft
 from src.game.sim.simulation import ENERGY_ITEM, Simulation
 from src.game.sim.world import Deposit
-from tests.conftest import SEED, make_world, power_grid, stock
+from tests.conftest import (SEED, STOCK_COUNT, make_world, place, power_grid,
+                            slot_of, stock)
 
 FLAT = 12                      # сторона плоского тестового мира
 DEPOSIT_TILE = (4, 5)          # залежь под будущим буром
@@ -76,10 +83,28 @@ def empty(container) -> None:
         container.take_slot(index)
 
 
+def give_materials(sim: Simulation, recipe) -> None:
+    """Кладёт в инвентарь сырьё под рецепт: на каждое свойство — самый узкий ресурс.
+
+    Узкий — чтобы один ресурс не закрыл два свойства сразу и тест проверял
+    рецепт, а не удачный подбор; что именно потратится, решает `plan_craft`.
+    """
+    for prop, count in recipe.requires:
+        item = min(sim.run.items.with_prop(prop), key=lambda i: (len(i.props), i.id))
+        sim.inventory.add(item.id, count)
+
+
+def spent_by(sim: Simulation, recipe) -> dict[str, int]:
+    """Что крафт потратит прямо сейчас — по тем же правилам, что и сам крафт."""
+    plan = plan_craft(recipe, sim.cargo, sim.run.items)
+    assert plan is not None, f"{recipe.id}: материалов не хватает"
+    return plan
+
+
 def build_line(sim: Simulation) -> tuple:
     """Бур на залежи → конвейер → склад плюс заправленный генератор под сеть.
 
-    Направление конвейера задаётся явно: `_build_direction` считает его от
+    Направление конвейера задаётся явно: `build_direction` считает его от
     дрона, а тест проверяет линию, а не эвристику поворота (она — отдельно).
     """
     dx, dy = DEPOSIT_TILE
@@ -149,17 +174,26 @@ def test_summary_sums_supply_and_demand_of_all_networks():
 
 
 # ------------------------------------------------------------- данные зданий
-def test_every_price_and_port_exists_in_the_data():
-    """Цены ссылаются на предметы ролей, порты — на известные роли контейнеров."""
+def test_every_recipe_and_port_exists_in_the_data():
+    """Рецепт постройки — из свойств, её предмет — в забеге, порты — известные роли."""
     sim = Simulation(SEED)
     ports = {PORT_IN, PORT_OUT, PORT_STORE, PORT_FUEL}
-    roles = {role.id for role in ROLES}
+    run_recipes = {recipe.id for recipe in sim.run.recipes}
     for kind in BUILD_ORDER:
         definition = building_def(kind)
-        for item_id, count in definition.cost:
-            assert item_id in roles, f"{kind}: цена {item_id} не из ролей"
-            assert item_id in sim.run.items, f"{kind}: цены {item_id} нет в забеге"
-            assert count >= 1, f"{kind}: цена {item_id} без количества"
+        recipe = definition.recipe
+        assert recipe is not None, f"{kind}: постройку нечем скрафтить"
+        assert recipe.id in run_recipes, f"{kind}: рецепта нет в забеге"
+        assert recipe.role == kind and recipe.outputs >= 1, \
+            f"{kind}: рецепт должен давать предмет этой постройки"
+        assert recipe.requires, f"{kind}: рецепт без требований"
+        for prop, count in recipe.requires:
+            assert isinstance(prop, Prop), f"{kind}: требование {prop} — не свойство"
+            assert count >= 1, f"{kind}: свойство {prop} без количества"
+        item = sim.run.items.get(kind)
+        assert item is not None, f"{kind}: предмета постройки нет в забеге"
+        assert item.building == kind, f"{kind}: предмет ставит не то здание"
+        assert item.stack_max == config.BUILDING_STACK
         ids = [c.id for c in definition.containers]
         assert len(set(ids)) == len(ids), f"{kind}: повтор id контейнера"
         for container in definition.containers:
@@ -171,6 +205,36 @@ def test_every_price_and_port_exists_in_the_data():
             assert definition.fuel, f"{kind}: даёт энергию, но нечем топиться"
             for mark in definition.fuel:
                 assert isinstance(mark, Prop) or mark in sim.run.items
+
+
+def test_buildings_unlock_by_the_base_relic_of_their_role():
+    """Лампа и лаборатория известны с начала, остальное открывает реликвия роли.
+
+    Без лампы первая ночь непроходима, без лаборатории не открыть свойства —
+    поэтому реликвия для них была бы замкнутым кругом (plan/02, plan/03).
+    """
+    expected = {
+        LAMP: None, LAB: None,
+        STORAGE: ROLE_STRUCTURE,
+        DRILL: ROLE_AUTOMATION, CONVEYOR: ROLE_AUTOMATION,
+        WIRE: ROLE_AUTOMATION, ASSEMBLER: ROLE_AUTOMATION,
+        GENERATOR: ROLE_ENERGY,
+    }
+    assert {kind: building_def(kind).unlock_role for kind in BUILD_ORDER} == expected
+
+    sim = Simulation(SEED)
+    for kind, role in expected.items():
+        known = sim.knowledge.is_known(building_def(kind).recipe.id)
+        assert known == (role is None), f"{kind}: неверно известна на старте"
+    for role in (ROLE_STRUCTURE, ROLE_AUTOMATION, ROLE_ENERGY):
+        relic = sim.run.relic_of(role)
+        assert relic is not None and sim.study_relic(relic), f"реликвия {role}"
+        for kind, unlock in expected.items():
+            if unlock == role:
+                assert sim.knowledge.is_known(building_def(kind).recipe.id), \
+                    f"реликвия {role} не открыла {kind}"
+    assert all(sim.knowledge.is_known(building_def(kind).recipe.id)
+               for kind in BUILD_ORDER)
 
 
 def test_every_role_has_two_recipes_with_time():
@@ -188,65 +252,150 @@ def test_crafting_buildings_have_input_and_output():
     assert definition.input_id is not None and definition.output_id is not None
 
 
-# -------------------------------------------------------------------- цены
-def test_building_costs_role_items_and_spends_exactly_them():
-    """Стройка списывает цену целиком и ровно её (plan/03)."""
+# ------------------------------------------------------- постройки-предметы
+def test_building_item_is_crafted_only_after_its_recipe_is_known():
+    """Крафт постройки (plan/02): неизученное не крафтится, изученное — в хотбар.
+
+    Склад открывает конструкционная реликвия. До неё рецепта нет даже в
+    панели крафта, и материалы лежат нетронутыми; после — крафт тратит ровно
+    то, что выбрал `plan_craft`, а предмет-постройка ложится в хотбар.
+    """
+    sim = Simulation(SEED)
+    recipe = building_def(STORAGE).recipe
+    give_materials(sim, recipe)
+    held = sorted(sim.cargo.items())
+    assert recipe.id not in {option.recipe_id for option in sim.craft_options()}, \
+        "неизученного рецепта в панели нет"
+    assert not sim.craft(recipe.id), "рецепт ещё не открыт"
+    assert sorted(sim.cargo.items()) == held, "отказ ничего не тратит"
+
+    assert sim.study_relic(sim.run.relic_of(ROLE_STRUCTURE))
+    plan = spent_by(sim, recipe)
+    before = {item_id: sim.cargo.count(item_id) for item_id in plan}
+    assert sim.craft(recipe.id)
+    for item_id, count in plan.items():
+        assert sim.cargo.count(item_id) == before[item_id] - count, item_id
+    assert sim.hotbar.count(STORAGE) == recipe.outputs, "постройка — в хотбар"
+    assert sim.inventory.count(STORAGE) == 0
+
+
+def test_craft_option_names_what_is_lacking():
+    """Игрок должен узнать, чего не хватает: панель называет свойства и количества.
+
+    «Есть M» считается только по открытым свойствам: ресурс со свойством,
+    которое игрок ещё не раскрыл, не подсказывает, что он подойдёт.
+    """
+    sim = Simulation(SEED)
+    recipe = building_def(STORAGE).recipe
+    sim.knowledge.learn(recipe.id)
+
+    def option():
+        return next(o for o in sim.craft_options() if o.recipe_id == recipe.id)
+
+    expected = tuple((PROP_NAMES[prop], count) for prop, count in recipe.requires)
+    assert tuple((name, need) for name, need, _have in option().requires) == expected
+    assert not option().available, "пустой инвентарь — чего-то да не хватает"
+    assert all(have == 0 for _name, _need, have in option().requires)
+
+    give_materials(sim, recipe)
+    assert not option().available, "свойства материалов ещё не открыты"
+    assert all(have == 0 for _name, _need, have in option().requires)
+    for item_id, _count in sim.cargo.items():
+        sim.knowledge.reveal_all(item_id)
+    assert option().available, "всё есть и всё известно — недостачи нет"
+    assert all(have >= need for _name, need, have in option().requires)
+
+
+def test_placing_spends_exactly_one_building_item():
+    """Постановка списывает ровно один предмет-постройку и больше ничего (plan/03).
+
+    Цена здания уже заплачена крафтом его предмета, поэтому ресурсы и предметы
+    ролей при постановке не трогаются.
+    """
+    sim = stock(Simulation(SEED))
+    tx, ty = int(sim.drone.x) + 1, int(sim.drone.y)
+    before = dict(sim.cargo.items())
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, STORAGE)))
+    storage = sim.apply(PlaceBuilding(sim.selected_slot, (tx, ty)))
+    assert storage is not None and sim.buildings.at(tx, ty) is storage
+    before[STORAGE] -= 1
+    assert dict(sim.cargo.items()) == before
+
+
+def test_without_a_building_item_nothing_is_built():
+    """Без предмета-постройки не построить, даже если сырьё на рецепт есть.
+
+    Постановка не крафтит сама: «есть из чего сделать» и «есть что поставить» —
+    разное, и второе решает только содержимое хотбара.
+    """
     sim = Simulation(SEED)
     tx, ty = int(sim.drone.x) + 1, int(sim.drone.y)
-    cost = sim.build_cost(STORAGE)
-    assert cost, "у склада должна быть цена"
-    assert not sim.can_afford(STORAGE)
-    assert sim.build(STORAGE, tx, ty) is None, "без материалов не построить"
+    give_materials(sim, building_def(STORAGE).recipe)
+    sim.inventory.add("structure", STOCK_COUNT)    # предмет роли — тоже не постройка
+    before = sim.state_signature()
+    assert sim.build(STORAGE, tx, ty) is None, "без предмета не построить"
+    assert sim.apply(PlaceBuilding(sim.selected_slot, (tx, ty))) is None, \
+        "пустой слот — не команда"
     assert sim.buildings.at(tx, ty) is None
-
-    for item_id, count in cost:
-        sim.inventory.add(item_id, count)
-    before = {item_id: sim.inventory.count(item_id) for item_id, _c in cost}
-    assert sim.build(STORAGE, tx, ty) is not None
-    for item_id, count in cost:
-        assert sim.inventory.count(item_id) == before[item_id] - count
+    assert sim.state_signature() == before, "отказ ничего не меняет"
 
 
-def test_missing_cost_names_what_is_lacking():
-    """Игрок должен узнать, чего не хватает, а не просто «нельзя»."""
-    sim = Simulation(SEED)
-    missing = sim.missing_cost(STORAGE)
-    assert missing, "пустой инвентарь — чего-то да не хватает"
-    for item_id, _count in sim.build_cost(STORAGE):
-        assert sim.run.items[item_id].name in missing
-    stock(sim)
-    assert sim.missing_cost(STORAGE) == "", "всё есть — недостачи нет"
+def test_dismantling_drops_exactly_one_building_item():
+    """Разбор роняет на тайл ровно один предмет-постройку (plan/03).
 
-
-def test_demolition_returns_nothing():
-    """Возврата цены нет (plan/03): иначе снос стал бы перемещением здания."""
+    В руки ничего не возвращается: снятое лежит там, где стояло, и
+    подбирается обычным автоподбором — иначе снос стал бы бесплатным
+    перемещением здания. Содержимое склада высыпается вокруг, сумма та же.
+    """
     sim = Simulation(SEED)
     tx, ty = int(sim.drone.x) + 1, int(sim.drone.y)
-    sim.inventory.add("structure", sim.build_cost(STORAGE)[0][1])
-    assert sim.build(STORAGE, tx, ty) is not None
-    spent = sim.inventory.count("structure")
-    assert sim.remove_building_at(tx, ty)
-    assert sim.inventory.count("structure") == spent, "снос ничего не вернул"
+    storage = place(sim, STORAGE, tx, ty)
+    assert storage is not None
+    store = storage.container(building_def(STORAGE).accept_id)
+    store.add("res0", 7)
+    store.add("structure", 3)
+    held = sorted(sim.cargo.items())
+
+    assert sim.apply(DismantleBuilding((tx, ty)))
+    assert sim.buildings.at(tx, ty) is None
+    assert [(d.item_id, d.count) for d in sim.drops.drops_at(tx, ty)] == [(STORAGE, 1)]
+    assert sim.drops.total() == {STORAGE: 1, "res0": 7, "structure": 3}, \
+        "содержимое выпало целиком"
+    assert sorted(sim.cargo.items()) == held, "в руки ничего не вернулось"
 
 
-def test_lamp_costs_materials_too():
-    """Лампа — такое же здание с ценой (plan/03), а не бесплатный свет."""
+def test_lamp_is_an_item_too():
+    """Лампа — такой же предмет-постройка (plan/03), а не бесплатный свет.
+
+    Приёмка: скрафтил лампу — она в хотбаре, выбрал слот, ПКМ по земле —
+    лампа стоит, предмет израсходован.
+    """
     sim = Simulation(SEED)
     tx, ty = int(sim.drone.x) + 1, int(sim.drone.y)
-    assert sim.place_lamp(tx, ty) is None
+    assert sim.build(LAMP, tx, ty) is None, "без предмета лампу не поставить"
     assert sim.light.lamps == []
-    stock(sim)
-    assert sim.place_lamp(tx, ty) is not None
+
+    recipe = building_def(LAMP).recipe
+    give_materials(sim, recipe)
+    assert sim.craft(recipe.id), "лампа известна с начала забега"
+    assert sim.cargo.count(LAMP) == sim.hotbar.count(LAMP) == recipe.outputs
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, LAMP)))
+    lamp = sim.apply(PlaceBuilding(sim.selected_slot, (tx, ty)))
+    assert lamp is not None and sim.light.lamp_at(tx, ty) is lamp
+    assert sim.cargo.count(LAMP) == recipe.outputs - 1, "предмет израсходован"
 
 
 def test_building_out_of_range_is_refused():
-    """Дальность проверяется до стройки: «далеко» и «нечем платить» — разное."""
+    """Дальность проверяется до стройки: «далеко» и «нечего ставить» — разное."""
     sim = stock(Simulation(SEED))
     far_x = int(sim.drone.x) + int(config.BUILD_RANGE) + 3
     ty = int(sim.drone.y)
+    held = sim.cargo.count(STORAGE)
     assert not sim.in_build_range(far_x, ty)
+    assert not sim.can_place(STORAGE, far_x, ty)
     assert sim.build(STORAGE, far_x, ty) is None, "далеко — не строим"
     assert sim.buildings.of_kind(STORAGE) == ()
+    assert sim.cargo.count(STORAGE) == held, "отказ не тратит предмет"
 
 
 def test_drill_is_the_only_building_that_stands_on_a_deposit():
@@ -380,7 +529,7 @@ def test_lamp_lights_only_from_the_grid():
     """Приёмка M4: лампа питается от генератора. Без сети она гаснет."""
     sim = stock(Simulation(SEED))
     tx, ty = int(sim.drone.x) + 2, int(sim.drone.y)
-    lamp = sim.place_lamp(tx, ty)
+    lamp = sim.build(LAMP, tx, ty)
     assert lamp is not None and not lamp.on, "лампа ставится выключенной"
     for _ in range(3):
         sim.update(config.TICK)
@@ -403,7 +552,7 @@ def test_wire_extends_the_network_through_empty_tiles():
     """Провод — плитка сети: без него тайлы через один не связаны (plan/03)."""
     sim = stock(Simulation(SEED))
     x, y = int(sim.drone.x), int(sim.drone.y)
-    lamp = sim.place_lamp(x - 1, y - 2)
+    lamp = sim.build(LAMP, x - 1, y - 2)
     generator = sim.build(GENERATOR, x - 1, y)
     assert lamp is not None and generator is not None, "рядом с дроном есть место"
     fill_generator(generator, sim)
@@ -429,7 +578,7 @@ def test_generator_burns_fuel_only_while_someone_needs_it():
     assert generator.burn == 0.0, "питать некого — топливо не тратится"
     assert generator.container(PORT_FUEL).count(fuel_id) == 5
 
-    lamp = sim.place_lamp(*free_tile(sim, LAMP, gx, gy))
+    lamp = sim.build(LAMP, *free_tile(sim, LAMP, gx, gy))
     assert lamp is not None
     for _ in range(3):
         sim.update(config.TICK)
@@ -441,7 +590,7 @@ def test_fuel_runs_out_and_the_network_goes_dark():
     """🔧 GENERATOR_FUEL_TIME секунд на единицу топлива — и сеть выключается."""
     sim = stock(Simulation(SEED))
     tx, ty = int(sim.drone.x) + 2, int(sim.drone.y)
-    lamp = sim.place_lamp(tx, ty)
+    lamp = sim.build(LAMP, tx, ty)
     generator = power_grid(sim, tx, ty, fuel=1)
     for _ in range(3):
         sim.update(config.TICK)
@@ -458,7 +607,7 @@ def test_power_at_shows_where_the_network_goes():
     sim = stock(Simulation(SEED))
     x, y = int(sim.drone.x), int(sim.drone.y)
     assert not sim.power_at(x - 1, y - 2), "пустая земля — не сеть"
-    assert sim.place_lamp(x - 1, y - 2) is not None
+    assert sim.build(LAMP, x - 1, y - 2) is not None
     assert sim.power_at(x - 1, y - 2), "лампа — точка сети"
     assert sim.build(WIRE, x - 1, y - 1) is not None
     assert sim.power_at(x - 1, y - 1), "провод — точка сети"
@@ -479,7 +628,7 @@ def test_power_state_goes_into_the_simulation_signature():
 
 # ---------------------------------------------------------------- сборщик
 def test_assembler_crafts_a_role_item_in_craft_time():
-    """Сборщик тратит 🔧 `Recipe.craft_time` — время, не занятое книгой рецептов."""
+    """Сборщик тратит 🔧 `Recipe.craft_time`: руками крафт мгновенный, время — его."""
     sim = stock(Simulation(SEED))
     ax, ay = int(sim.drone.x) + 1, int(sim.drone.y)
     assembler = sim.build(ASSEMBLER, ax, ay)

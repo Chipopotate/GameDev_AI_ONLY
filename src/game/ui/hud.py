@@ -49,6 +49,15 @@ def _wrap(text: str, width: int, size: int) -> list[str]:
     return lines
 
 
+def _fit(text: str, width: int, size: int) -> str:
+    """Обрезает строку с многоточием, чтобы она влезла в ширину."""
+    if widgets.text_width(text, size) <= width:
+        return text
+    while text and widgets.text_width(text + "…", size) > width:
+        text = text[:-1]
+    return text.rstrip() + "…"
+
+
 def _pause_overlay(size: tuple[int, int]) -> pygame.Surface:
     """Затемнение под паузу. Кэшируется — не создаём Surface каждый кадр."""
     surf = _pause_overlays.get(size)
@@ -67,9 +76,16 @@ class Hud:
         #: Панель быстрого доступа видна всегда — и поверх открытых окон.
         self.hotbar = HotbarBar(icons)
         self._controls_cache: list[tuple[str, int]] | None = None
+        #: Таблица клавиш статична — рисуется один раз в свою поверхность.
+        self._controls_surface: pygame.Surface | None = None
+        #: Панели, нарисованные в последнем кадре: над ними мир не получает ни
+        #: кликов, ни призрака (plan/10: «курсор над картой, не над UI»).
+        self._panels: list[pygame.Rect] = []
 
     def draw(self, target: pygame.Surface, sim: Simulation, camera: Camera,
-             fps: float, paused: bool, window_open: bool = False) -> None:
+             fps: float, paused: bool = False, window_open: bool = False) -> None:
+        """Панели HUD. Пауза рисуется отдельно (`draw_pause`) — поверх окон."""
+        self._panels = []
         self._draw_status(target, sim, camera, fps)
         self._draw_time(target, sim)
         self._draw_inventory(target, sim)
@@ -79,8 +95,10 @@ class Hud:
         self._draw_toasts(target, sim)
         if not window_open:
             self._draw_prompt(target, sim)
-        if paused:
-            self._draw_pause(target)
+
+    def draw_pause(self, target: pygame.Surface) -> None:
+        """Плашка паузы — самым верхним слоем: иначе её закрывало окно предметов."""
+        self._draw_pause(target)
 
     def draw_hotbar(self, target: pygame.Surface, sim: Simulation,
                     tooltip: bool = True) -> None:
@@ -88,12 +106,19 @@ class Hud:
         self.hotbar.draw(target, sim, pygame.mouse.get_pos(), tooltip=tooltip)
 
     def over_ui(self, pos: tuple[int, int]) -> bool:
-        """Над интерактивной частью HUD (хотбаром) ли курсор.
+        """Над интерфейсом ли курсор: хотбар или любая панель HUD прошлого кадра.
 
-        Справочные панели (статус, время, подсказка клавиш) ввод не берут —
-        как и раньше: иначе подсказка управления занимала бы угол карты.
+        Над панелью мир не виден, поэтому и призрак, и клик «под панель» были бы
+        действием вслепую (plan/10).
         """
-        return self.hotbar.contains(pos)
+        if self.hotbar.contains(pos):
+            return True
+        return any(rect.collidepoint(pos) for rect in self._panels)
+
+    def _panel(self, target: pygame.Surface, rect) -> None:
+        """Рисует подложку панели и запоминает её место для `over_ui`."""
+        widgets.draw_panel(target, rect)
+        self._panels.append(pygame.Rect(rect))
 
     # --------------------------------------------------------- левый верх
     def _draw_status(self, target: pygame.Surface, sim: Simulation,
@@ -116,7 +141,7 @@ class Hud:
         )
         w = 190
         h = len(lines) * 18 + 12
-        widgets.draw_panel(target, (m, m, w, h))
+        self._panel(target, (m, m, w, h))
         for i, line in enumerate(lines):
             widgets.draw_text(target, line, (m + 10, m + 6 + i * 18),
                               size=config.UI_FONT_SIZE_SMALL)
@@ -144,7 +169,7 @@ class Hud:
         h = len(lines) * 18 + 12
         x = config.WINDOW_W // 2 - w // 2
         y = config.UI_MARGIN
-        widgets.draw_panel(target, (x, y, w, h))
+        self._panel(target, (x, y, w, h))
         for i, (text, color) in enumerate(lines):
             widgets.draw_text(target, text, (config.WINDOW_W // 2, y + 6 + i * 18),
                               color=color, size=config.UI_FONT_SIZE_SMALL, align="center")
@@ -158,7 +183,7 @@ class Hud:
         w = 232
         h = 30 + max(1, len(items)) * ROW_H + 8
         y = config.WINDOW_H - m - h
-        widgets.draw_panel(target, (m, y, w, h))
+        self._panel(target, (m, y, w, h))
         widgets.draw_text(target, f"Инвентарь {inv.used_slots}/{inv.size}",
                           (m + 10, y + 8), size=config.UI_FONT_SIZE)
         if not items:
@@ -169,7 +194,10 @@ class Hud:
             ry = y + 32 + i * ROW_H
             target.blit(self.icons.item_icon(rid), (m + 10, ry))
             item = sim.run.items[rid]
-            widgets.draw_text(target, item.name, (m + 40, ry + 4), size=config.UI_FONT_SIZE)
+            # Длинное имя («Конструкционный материал») наезжало на число.
+            room = w - 40 - 12 - widgets.text_width(str(count), config.UI_FONT_SIZE) - 8
+            widgets.draw_text(target, _fit(item.name, room, config.UI_FONT_SIZE),
+                              (m + 40, ry + 4), size=config.UI_FONT_SIZE)
             widgets.draw_text(target, str(count), (m + w - 12, ry + 4), align="right",
                               color=theme.OK, size=config.UI_FONT_SIZE)
 
@@ -180,17 +208,31 @@ class Hud:
         Строки длинные, поэтому они переносятся по ширине 🔧 `CONTROLS_W`:
         узкая колонка оставляет центр экрана карте.
         """
-        m = config.UI_MARGIN
-        size = config.UI_FONT_SIZE_SMALL
-        lines = self._control_lines()
-        w = CONTROLS_W + 24
-        h = len(lines) * CONTROLS_ROW + 12
-        x = config.WINDOW_W - m - w
+        surf = self._controls_panel()
+        w, h = surf.get_size()
+        x = config.WINDOW_W - config.UI_MARGIN - w
         y = self.hotbar.rect.top - CONTROLS_GAP - h
-        widgets.draw_panel(target, (x, y, w, h))
-        for i, (line, indent) in enumerate(lines):
-            widgets.draw_text(target, line, (x + 12 + indent, y + 6 + i * CONTROLS_ROW),
-                              color=theme.UI_TEXT_DIM, size=size)
+        target.blit(surf, (x, y))
+        self._panels.append(pygame.Rect(x, y, w, h))
+
+    def _controls_panel(self) -> pygame.Surface:
+        """Таблица клавиш целиком — одна поверхность на всю игру.
+
+        Таблица не меняется, а это ~27 строк текста: рендерить их каждый кадр
+        значило бы создавать столько же поверхностей (CLAUDE.md, «кэши»).
+        """
+        if self._controls_surface is None:
+            size = config.UI_FONT_SIZE_SMALL
+            lines = self._control_lines()
+            w = CONTROLS_W + 24
+            h = len(lines) * CONTROLS_ROW + 12
+            surf = pygame.Surface((w, h), pygame.SRCALPHA)
+            widgets.draw_panel(surf, (0, 0, w, h))
+            for i, (line, indent) in enumerate(lines):
+                widgets.draw_text(surf, line, (12 + indent, 6 + i * CONTROLS_ROW),
+                                  color=theme.UI_TEXT_DIM, size=size)
+            self._controls_surface = surf
+        return self._controls_surface
 
     def _control_lines(self) -> list[tuple[str, int]]:
         """Строки таблицы, перенесённые по словам. Считаются один раз."""
@@ -270,13 +312,15 @@ class Hud:
             return f"{name}: истощено", theme.UI_TEXT_DIM
         if sim.mine_target is d:
             return f"Добываю {name}", theme.MINE_BAR_FG
+        if sim.scan_target is d:
+            # Скан достаёт дальше добычи (🔧 SCAN_RANGE > MINE_RANGE): пока он
+            # идёт, «слишком далеко» было бы неправдой.
+            return f"Сканирую {name}", theme.SCAN_BAR_FG
         if not sim.in_mine_range(d):
             return f"{name}: слишком далеко", theme.UI_TEXT_DIM
         text = f"ЛКМ — добывать {name}"
         if kind is not None:
             pass                               # ПКМ занята постройкой: скана нет
-        elif sim.scan_target is d:
-            text += ", ПКМ — сканирую"
         elif sim.knowledge.unknown(d.resource_id):
             # С M4 скан стоит энергии: подсказка говорит об этом заранее, иначе
             # игрок просто держал бы ПКМ и ждал.

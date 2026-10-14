@@ -6,10 +6,12 @@ import pytest
 
 from src.game import config
 from src.game.data.buildings import LAB, LAB_SAMPLES
+from src.game.sim.commands import DismantleBuilding, PlaceBuilding, SelectHotbar
 from src.game.sim.run_gen import generate_run
-from src.game.sim.simulation import BUILD_LAMP, ENERGY_ITEM, Simulation
+from src.game.sim.simulation import ENERGY_ITEM, Simulation
 from src.game.sim.world import Deposit
-from tests.conftest import SEED, make_world, power_grid, stock
+from tests.conftest import (SEED, give_building, make_world, place, power_grid,
+                            slot_of, stock)
 
 #: Ресурсы забега с сидом 0 — на крошечных тестовых картах симуляция берёт их же.
 IDS = generate_run(0).items.natural_ids
@@ -335,19 +337,18 @@ def test_craft_consumes_materials_and_produces_role_item():
 
 def test_lab_window_opens_only_next_to_the_lab():
     """ПКМ по зданию открывает его контейнеры, только если дрон рядом."""
-    sim = stock(Simulation(SEED))
-    sim.select_build(LAB)
+    sim = Simulation(SEED)
     x, y = int(sim.drone.x) + 1, int(sim.drone.y)
-    assert sim.click_at(x, y) == LAB
-    lab = sim.buildings.at(x, y)
+    lab = place(sim, LAB, x, y)
+    assert lab is not None and sim.buildings.at(x, y) is lab
     assert sim.building_reachable(lab)
     assert not sim.building_reachable(None), "окно без здания не открыть"
     # Отошли далеко — контейнеры здания больше не открыть.
     sim.drone.x, sim.drone.y = x + config.CONTAINER_RANGE + 3, y + 0.5
     assert not sim.building_reachable(lab)
-    # Снесли здание — окно закрывать нечему.
+    # Разобрали здание — окно закрывать нечему.
     sim.drone.x, sim.drone.y = x + 0.5, y + 0.5
-    assert sim.click_at(x, y) == "building_removed"
+    assert sim.apply(DismantleBuilding((x, y)))
     assert not sim.building_reachable(lab)
 
 
@@ -442,30 +443,51 @@ def test_lab_cannot_be_placed_far_or_on_a_deposit():
     assert sim.buildings.at(deposit.x, deposit.y) is None
 
 
-def test_click_removes_a_building():
-    sim = stock(Simulation(SEED))
-    sim.select_build(LAB)
-    x, y = int(sim.drone.x) + 1, int(sim.drone.y)
-    assert sim.click_at(x, y) == LAB
-    assert sim.buildings.at(x, y) is not None
-    assert sim.click_at(x, y) == "building_removed"
-    assert sim.buildings.at(x, y) is None
+def test_place_command_spends_one_item_and_a_second_one_does_not_remove():
+    """ПКМ ставит постройку из слота хотбара и тратит ровно один предмет.
 
-
-def test_select_build_rejects_unknown_kind():
+    Повторная команда на занятый тайл здание **не** снимает (прежний «второй
+    клик сносит» убран, plan/10): она ничего не меняет и предмет не тратит.
+    """
     sim = Simulation(SEED)
-    assert sim.select_build("нет такого") is False
-    assert sim.selected_build == BUILD_LAMP
+    give_building(sim, LAB, 2)
+    slot = slot_of(sim.hotbar, LAB)
+    assert sim.apply(SelectHotbar(slot))
+    x, y = int(sim.drone.x) + 1, int(sim.drone.y)
+    lab = sim.apply(PlaceBuilding(slot, (x, y)))
+    assert lab is not None and sim.buildings.at(x, y) is lab
+    assert sim.hotbar.count(LAB) == 1, "потрачен ровно один предмет"
+    assert sim.apply(PlaceBuilding(slot, (x, y))) is None, "тайл занят"
+    assert sim.buildings.at(x, y) is lab, "здание стоит, его не сняли"
+    assert sim.hotbar.count(LAB) == 1, "недопустимая постановка не тратит предмет"
+
+
+def test_dismantle_command_removes_a_building():
+    """Снять здание — отдельная команда `DismantleBuilding` (её даёт удержание ЛКМ)."""
+    sim = Simulation(SEED)
+    x, y = int(sim.drone.x) + 1, int(sim.drone.y)
+    assert place(sim, LAB, x, y) is not None
+    assert sim.apply(DismantleBuilding((x, y)))
+    assert sim.buildings.at(x, y) is None
+    assert not sim.apply(DismantleBuilding((x, y))), "снимать больше нечего"
+
+
+def test_select_hotbar_rejects_a_missing_slot():
+    """Слотов ровно 🔧 `HOTBAR_SLOTS`: номер за пределами ничего не выбирает."""
+    sim = Simulation(SEED)
+    assert sim.apply(SelectHotbar(config.HOTBAR_SLOTS)) is False
+    assert sim.apply(SelectHotbar(-1)) is False
+    assert sim.selected_slot == 0
+    assert sim.selected_building() is None, "пустой слот — не постройка"
 
 
 # ------------------------------------------------------------- снос зданий
 def placed_lab(sim: Simulation):
-    """Ставит лабораторию рядом с дроном и возвращает её (цена уже оплачена)."""
-    stock(sim)
-    sim.select_build(LAB)
+    """Ставит лабораторию рядом с дроном и возвращает её (предмет потрачен)."""
     x, y = int(sim.drone.x) + 1, int(sim.drone.y)
-    assert sim.click_at(x, y) == LAB
-    return sim.buildings.at(x, y)
+    lab = place(sim, LAB, x, y)
+    assert lab is not None, "лаборатория не встала"
+    return lab
 
 
 def building_total(sim: Simulation) -> int:
@@ -575,38 +597,82 @@ def test_demolition_keeps_a_half_analyzed_sample():
     assert sim.knowledge.unknown(item.id), "свойств лаборатория не открыла"
 
 
-def test_demolish_by_hand_and_by_click_are_the_same_thing():
+def lab_with_samples(count: int):
+    """Лаборатория с образцами и дрон в 4 тайлах от неё.
+
+    Дальше радиуса подбора, но в 🔧 `BUILD_RANGE`: снять здание можно, а
+    выпавшее остаётся лежать, как упало, — его удобно сравнивать.
+    """
     sim = Simulation(SEED)
     lab = placed_lab(sim)
     item = sim.run.items.natural[0].id
-    lab.container(LAB_SAMPLES).add(item, 2)
-    assert sim.remove_building_at(lab.x, lab.y)
-    assert sim.drops.total().get(item, 0) == 2
-    assert not sim.remove_building_at(lab.x, lab.y), "сносить больше нечего"
+    lab.container(LAB_SAMPLES).add(item, count)
+    sim.drone.x, sim.drone.y = lab.x + 0.5 - 4, lab.y + 0.5
+    assert config.PICKUP_RADIUS < 3 and sim.in_build_range(lab.x, lab.y)
+    return sim, lab, item
 
 
-def test_demolished_items_can_be_picked_up_again():
-    """Критерий приёмки: снести лабораторию с образцами и подобрать их обратно."""
-    sim = Simulation(SEED)
-    lab = placed_lab(sim)
-    item = sim.run.items.natural[0].id
-    lab.container(LAB_SAMPLES).add(item, 3)
-    assert sim.demolish(lab)
-    drop = sim.drops.items[0]
-    sim.drone.x, sim.drone.y = drop.center      # дрон подошёл к куче
-    run(sim, config.TICK)
-    assert sim.inventory.count(item) == 3, "дрон подобрал свой образец"
+def test_dismantle_by_hold_and_by_command_are_the_same_thing():
+    """Удержание ЛКМ и команда `DismantleBuilding` разбирают одинаково."""
+    by_hand, lab, item = lab_with_samples(2)
+    by_hand.set_cursor_tile(lab.x, lab.y)
+    by_hand.set_mining(True)
+    run(by_hand, config.DISMANTLE_TIME + 2 * config.TICK)
+    assert by_hand.buildings.at(lab.x, lab.y) is None, "удержание разобрало здание"
+
+    by_command, lab2, _item = lab_with_samples(2)
+    assert by_command.apply(DismantleBuilding((lab2.x, lab2.y)))
+    assert by_hand.drops.total() == by_command.drops.total() == {item: 2, LAB: 1}
+    assert sorted(by_hand.drops.tiles) == sorted(by_command.drops.tiles)
+    assert not by_command.apply(DismantleBuilding((lab2.x, lab2.y))), \
+        "снимать больше нечего"
+
+
+def test_released_button_keeps_the_building_standing():
+    """Отпустил ЛКМ раньше времени — прогресс сброшен, здание и образцы на месте."""
+    sim, lab, item = lab_with_samples(2)
+    sim.set_cursor_tile(lab.x, lab.y)
+    sim.set_mining(True)
+    run(sim, config.DISMANTLE_TIME * 0.5)
+    assert 0.0 < sim.dismantle_progress < 1.0
+    sim.set_mining(False)
+    run(sim, config.DISMANTLE_TIME)
+    assert sim.dismantle_progress == 0.0 and sim.dismantle_target is None
+    assert sim.buildings.at(lab.x, lab.y) is lab
+    assert lab.container(LAB_SAMPLES).count(item) == 2
     assert len(sim.drops) == 0
 
 
-def test_demolition_does_not_refund_the_build_cost():
-    """Здания до M4 бесплатны: возвращать нечего (решение за экономикой, M4)."""
+def test_demolished_items_can_be_picked_up_again():
+    """Критерий приёмки: разобрать лабораторию с образцами и подобрать всё обратно.
+
+    Предмет-лаборатория возвращается в хотбар (правило `Cargo`), образцы — в
+    инвентарь: оба просто подобраны с земли, отдельного «возврата» нет.
+    """
+    sim, lab, item = lab_with_samples(3)
+    assert sim.dismantle_building(lab.x, lab.y)
+    assert sim.drops.total() == {item: 3, LAB: 1}
+    for drop in list(sim.drops.items):
+        sim.drone.x, sim.drone.y = drop.center      # дрон подошёл к куче
+        run(sim, config.TICK)
+    assert sim.inventory.count(item) == 3, "дрон подобрал свой образец"
+    assert sim.hotbar.count(LAB) == 1, "предмет-лаборатория снова в хотбаре"
+    assert len(sim.drops) == 0
+
+
+def test_dismantling_returns_the_building_as_one_item_on_the_ground():
+    """Цена здания — его предмет: разбор роняет ровно одну постройку на её тайл.
+
+    Прямо «в руку» предмет не кладётся (plan/03): он лежит там, где стояло
+    здание, и подбирается обычным автоподбором.
+    """
     sim = Simulation(SEED)
     lab = placed_lab(sim)
-    before = sim.inventory.total_count()
-    assert sim.demolish(lab)
-    assert sim.inventory.total_count() == before
-    assert sim.drops.total() == {}, "пустое здание ничего не роняет"
+    before = sim.cargo.count(LAB)
+    assert sim.dismantle_building(lab.x, lab.y)
+    assert sim.cargo.count(LAB) == before, "в хотбар напрямую не кладётся"
+    assert sim.drops.total() == {LAB: 1}, "пустое здание роняет только себя"
+    assert [d.tile for d in sim.drops.items] == [(lab.x, lab.y)]
 
 
 def test_prop_slots_show_unknown_as_none():

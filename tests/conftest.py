@@ -27,7 +27,7 @@ STOCK_COUNT = 30
 
 
 def stock(sim: Simulation, count: int = STOCK_COUNT) -> Simulation:
-    """Выдаёт дрону запас — «экономика» для тестов.
+    """Доливает дрону запас до нормы — «экономика» для тестов.
 
     По стаку каждого предмета роли (скан тратит энергию, сборщику нужны
     материалы) и по стаку каждого **предмета-постройки**: здание ставится
@@ -36,10 +36,15 @@ def stock(sim: Simulation, count: int = STOCK_COUNT) -> Simulation:
     проверять то, ради чего тест написан. Постройки ложатся в хотбар, роли — в
     инвентарь (правило `Cargo`).
     """
+    # Доливка до нормы, а не «ещё по стаку»: хелперы зовут друг друга
+    # (`power_lamp` → `power_grid` → `stock`), и повторный вызов не должен
+    # переполнять хранилище дрона.
     for role in ROLES:
-        sim.inventory.add(role.id, count)
+        sim.inventory.add(role.id, max(0, count - sim.cargo.count(role.id)))
     for kind in BUILD_ORDER:
-        give_building(sim, kind, config.BUILDING_STACK)
+        missing = config.BUILDING_STACK - sim.cargo.count(kind)
+        if missing > 0:
+            give_building(sim, kind, missing)
     return sim
 
 

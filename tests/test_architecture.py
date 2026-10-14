@@ -36,7 +36,7 @@ def test_sim_imports_without_pygame_in_fresh_process():
         "import src.game.sim.simulation, src.game.sim.world, src.game.sim.units,"
         "src.game.sim.resources, src.game.sim.time_cycle, src.game.sim.light,"
         "src.game.sim.run_gen, src.game.sim.research, src.game.sim.buildings,"
-        "src.game.sim.drops, src.game.sim.power,"
+        "src.game.sim.drops, src.game.sim.power, src.game.sim.commands,"
         "src.game.data.resources, src.game.data.recipes, src.game.data.relics,"
         "src.game.data.buildings, src.game.config;"
         "assert 'pygame' not in sys.modules, sorted(m for m in sys.modules if 'pygame' in m);"
@@ -102,16 +102,21 @@ def test_config_values_are_sane():
     assert config.DARKNESS_FADE > 0
     assert 0 < config.NIGHT_DARKNESS_ALPHA <= 255
     assert config.LAMP_LIGHT_RADIUS > 0 and config.DRONE_LIGHT_RADIUS > 0
-    assert config.LAMP_PLACE_RANGE >= 0
     # M4: экономика и энергия
-    assert config.BUILD_RANGE >= config.LAMP_PLACE_RANGE, \
-        "здание не должно ставиться дальше лампы"
+    assert config.BUILD_RANGE > 0, "общий радиус постановки для всех зданий"
     assert config.CONTAINER_RANGE > 0
     assert config.GENERATOR_FUEL_TIME > 0, "иначе топливо сгорит мгновенно"
     assert config.DRILL_TIME_PER_UNIT > 0 and config.CONVEYOR_MOVE_TIME > 0
     assert config.CONVEYOR_BATCH >= 1 and config.ASSEMBLER_SPEED > 0
     assert config.LAMP_POWER_USE > 0, "лампа должна что-то тратить (M4)"
     assert config.SCAN_ENERGY_COST >= 1
+    # Постройки-предметы, хотбар, призрак, демонтаж и луч дрона (plan/03, plan/10)
+    assert 1 <= config.HOTBAR_SLOTS <= 9, "слоты выбираются клавишами 1…9"
+    assert config.BUILDING_STACK >= 1
+    assert config.DISMANTLE_TIME > 0, "иначе разбор шёл бы без удержания"
+    assert 0 < config.GHOST_ALPHA < 255, "призрак полупрозрачный"
+    assert config.LASER_FADE_TIME > 0
+    assert config.HANDCRAFT_TIME >= 0
 
 
 def test_start_zone_fits_in_map():
@@ -129,7 +134,7 @@ def test_expected_modules_exist():
         assert (game_dir / name / "__init__.py").is_file(), f"{name} без __init__.py"
     for name in ("world.py", "simulation.py", "units.py", "resources.py",
                  "time_cycle.py", "light.py", "run_gen.py", "research.py",
-                 "buildings.py", "drops.py", "power.py"):
+                 "buildings.py", "drops.py", "power.py", "commands.py"):
         assert (SIM_DIR / name).is_file(), f"нет sim/{name}"
 
 
@@ -151,6 +156,7 @@ def test_expected_modules_exist():
     "src.game.sim.buildings",
     "src.game.sim.drops",
     "src.game.sim.power",
+    "src.game.sim.commands",
 ])
 def test_module_imports_cleanly(module):
     __import__(module)

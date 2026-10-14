@@ -365,7 +365,9 @@ def test_lamp_opens_the_darkness_without_glow(display):
     держало яркое пятно поверх тьмы, которое заливало постройки «туманом».
     На `low` пятен нет — значит, светлее здесь только из-за самой тьмы.
     """
-    sim = flat_sim()
+    # Без `flat_sim`: запас построек и топлива выдаёт сам `power_lamp`, а
+    # второй такой же запас в хранилище дрона уже не влезает.
+    sim = Simulation(0, world=flat_world(30, 30))
     camera, renderer = make_frame(sim)
     tx, ty = int(sim.drone.x) + 3, int(sim.drone.y)
     power_lamp(sim, tx, ty)
@@ -415,7 +417,11 @@ def test_no_power_mark_lies_on_top_of_everything(display):
     ox, oy = NO_POWER_OFFSET
     sx, sy = camera.world_to_screen(x + 0.5 + ox, y + 0.5 + oy)
     ring = int(camera.scale * NO_POWER_SIZE * 0.44 * 0.77)  # середина красной каймы
-    r, g, b = display.get_at((int(sx) - ring, int(sy)))[:3]
+    # Кайма тоньше двух пикселей, а размер значка и его центр округляются до
+    # целых: середина каймы попадает в пиксель ±1 от расчётной точки. Берём
+    # самый красный из трёх — закрытый или погасший значок красным не будет нигде.
+    r, g, b = max((display.get_at((int(sx) - ring + d, int(sy)))[:3] for d in (-1, 0, 1)),
+                  key=lambda c: c[0] - c[1])
     assert r > 150 and r > g + 60, f"значок закрыт или погас: {(r, g, b)}"
 
 

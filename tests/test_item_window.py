@@ -1,4 +1,4 @@
-"""Окно предметов: сетка слотов, перенос, сортировка, снос (M3.5, plan/03)."""
+"""Окно предметов: сетки дрона и зданий, перенос, сортировка, крафт (M3.5, plan/02, plan/03)."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import pygame
 import pytest
 
 from src.game import config
-from src.game.data.buildings import LAB, LAB_SAMPLES
+from src.game.data.buildings import LAB, LAB_SAMPLES, LAMP
 from src.game.render.icons import IconCache
 from src.game.sim.resources import Stack
 from src.game.sim.simulation import Simulation
 from src.game.ui.item_window import (DOUBLE_CLICK_MS, MODE_CONTAINER, MODE_DRONE,
                                      ItemWindow)
-from tests.conftest import SEED, stock
+from tests.conftest import SEED, place
 
 
 @pytest.fixture(scope="module")
@@ -42,12 +42,12 @@ def button_pos(window: ItemWindow, sim: Simulation, panel: int) -> tuple[int, in
 
 
 def put_lab(sim: Simulation):
-    """Ставит лабораторию рядом с дроном, как это делает игрок (M4: за плату)."""
-    stock(sim)
-    sim.select_build(LAB)
+    """Ставит лабораторию рядом с дроном, как это делает игрок: из предмета-постройки."""
     x, y = int(sim.drone.x) + 1, int(sim.drone.y)
-    assert sim.click_at(x, y) == LAB
-    return sim.buildings.at(x, y)
+    lab = place(sim, LAB, x, y)
+    assert lab is not None and sim.buildings.at(x, y) is lab
+    assert sim.cargo.count(LAB) == 0, "предмет-постройка потрачен на здание"
+    return lab
 
 
 def samples(lab):
@@ -79,13 +79,41 @@ def test_window_is_closed_until_asked(window):
 
 
 def test_drone_window_shows_the_whole_inventory(window):
+    """Окно E: сетка инвентаря и под ней отдельный ряд хотбара (plan/03)."""
     w, sim, _screen = window
     w.open_drone(sim)
     panels = w.panels(sim)
-    assert len(panels) == 1
-    assert panels[0].container is sim.inventory
-    assert panels[0].grid.cols * panels[0].grid.rows(sim.inventory.size) >= \
-        sim.inventory.size, "все слоты дрона должны быть видны"
+    assert len(panels) == 2
+    assert panels[0].container is sim.inventory and panels[1].container is sim.hotbar
+    for panel in panels:
+        container = panel.container
+        assert panel.grid.cols * panel.grid.rows(container.size) >= container.size, \
+            "все слоты дрона должны быть видны"
+    assert panels[1].grid.rows(sim.hotbar.size) == 1, "хотбар — один ряд"
+    assert panels[1].active == sim.selected_slot, "выбранный слот подсвечен и в окне"
+    placed = w._layout(sim)[1]                   # координаты считает раскладка
+    inventory, hotbar = placed[0], placed[1]
+    inventory_bottom = inventory.origin[1] + inventory.grid.size(sim.inventory.size)[1]
+    assert hotbar.origin[1] > inventory_bottom, "хотбар — под основной сеткой"
+
+
+def test_drone_window_has_the_craft_panel_and_the_lab_window_does_not(window):
+    """Крафт живёт в окне E, справа от сеток; в окне здания его нет (plan/02)."""
+    w, sim, _screen = window
+    lab = put_lab(sim)
+    w.open_drone(sim)
+    assert w.has_craft
+    (x, y, ww, hh), panels = w._layout(sim)
+    window_rect = pygame.Rect(x, y, ww, hh)
+    search = w.craft.search.rect
+    assert window_rect.contains(search), "панель крафта — внутри окна"
+    grids_right = max(p.origin[0] + p.grid.size(p.container.size)[0] for p in panels)
+    assert search.left >= grids_right, "панель крафта — справа от сеток"
+
+    w.open_container(sim, lab)
+    assert not w.has_craft, "в окне здания панели крафта нет"
+    assert [p.container for p in w.panels(sim)] == \
+        [samples(lab), sim.inventory, sim.hotbar], "слева здание, справа дрон"
 
 
 def test_lab_window_shows_lab_and_drone(window):
@@ -93,8 +121,9 @@ def test_lab_window_shows_lab_and_drone(window):
     lab = put_lab(sim)
     w.open_container(sim, lab)
     panels = w.panels(sim)
-    assert len(panels) == 2
-    assert panels[0].container is samples(lab) and panels[1].container is sim.inventory
+    assert len(panels) == 3
+    assert panels[0].container is samples(lab)
+    assert panels[1].container is sim.inventory and panels[2].container is sim.hotbar
     assert panels[0].container.size == config.LAB_SLOTS
     assert panels[0].title == "Образцы", "заголовок берётся из данных здания"
 
@@ -108,7 +137,8 @@ def test_lab_window_shows_slot_states(window):
     panels = w.panels(sim)
     assert len(panels[0].statuses) == config.LAB_SLOTS
     assert panels[0].statuses[0][0] == "analyzing"
-    assert panels[1].statuses == (), "у инвентаря дрона состояний нет"
+    assert panels[1].statuses == () and panels[2].statuses == (), \
+        "у сеток дрона состояний нет"
 
 
 def test_window_fits_on_screen(window):
@@ -333,13 +363,18 @@ def test_shift_click_moves_a_stack_between_lab_and_drone(window):
     assert samples(lab).total_count() == 0 and sim.inventory.count(item) == 6
 
 
-def test_shift_click_in_the_drone_window_does_nothing(window):
+def test_shift_click_in_the_drone_window_moves_between_inventory_and_hotbar(window):
+    """В окне E Shift+ЛКМ перекидывает стак между инвентарём и хотбаром."""
     w, sim, _screen = window
-    sim.inventory.add(item_of(sim), 3)
+    item = item_of(sim)
+    sim.inventory.add(item, 3)
     w.open_drone(sim)
-    w.click(slot_pos(w, sim, 0, 0), 1, sim, shift=True)
-    assert sim.inventory.count(item_of(sim)) == 3
+    w.click(slot_pos(w, sim, 0, 0), 1, sim, shift=True)     # инвентарь → хотбар
+    assert sim.inventory.count(item) == 0 and sim.hotbar.count(item) == 3
     assert w.held is None
+    w.click(slot_pos(w, sim, 1, slot_of(sim.hotbar, item)), 1, sim, shift=True)
+    assert sim.hotbar.count(item) == 0 and sim.inventory.count(item) == 3, \
+        "хотбар → инвентарь"
 
 
 def test_shift_click_reports_when_there_is_no_room(window):
@@ -352,6 +387,34 @@ def test_shift_click_reports_when_there_is_no_room(window):
     w.click(slot_pos(w, sim, 1, 0), 1, sim, shift=True)
     assert sim.inventory.count(item) == 1, "не влезло — осталось у дрона"
     assert any("места" in t.text.lower() for t in sim.toasts)
+
+
+def test_left_click_carries_a_stack_from_the_inventory_to_the_hotbar(window):
+    """Перетаскивание между сетками дрона — та же логика ЛКМ, что внутри сетки."""
+    w, sim, _screen = window
+    sim.inventory.add(LAMP, 3)                   # прямо в инвентарь, мимо правила
+    w.open_drone(sim)
+    w.click(slot_pos(w, sim, 0, 0), 1, sim)
+    w.click(slot_pos(w, sim, 1, 4), 1, sim)
+    assert w.held is None
+    assert sim.hotbar.slot(4).item_id == LAMP and sim.hotbar.slot(4).count == 3
+    assert sim.inventory.count(LAMP) == 0
+
+
+def test_right_click_put_one_respects_the_building_stack_limit(window):
+    """ПКМ «положить одну» не переполняет стак постройки: лимит 🔧 `BUILDING_STACK`."""
+    w, sim, _screen = window
+    limit = config.BUILDING_STACK
+    assert sim.hotbar.max_for(LAMP) == limit < sim.hotbar.stack_max
+    sim.hotbar.slots[0] = Stack(LAMP, limit - 1)
+    sim.inventory.add(LAMP, 3)
+    w.open_drone(sim)
+    w.click(slot_pos(w, sim, 0, 0), 1, sim)      # три лампы в руку
+    w.click(slot_pos(w, sim, 1, 0), 3, sim)      # одна досыпается до лимита
+    assert sim.hotbar.slot(0).count == limit and w.held.count == 2
+    w.click(slot_pos(w, sim, 1, 0), 3, sim)      # стак полон — ничего
+    assert sim.hotbar.slot(0).count == limit and w.held.count == 2
+    assert sim.cargo.count(LAMP) + w.held.count == limit + 2, "ничего не потеряно"
 
 
 # ------------------------------------------------------------------ выброс
@@ -393,6 +456,19 @@ def test_close_drops_what_does_not_fit(window):
     assert w.held is None
     assert len(sim.drops) == 1, "не влезло — упало под ноги"
     assert sim.drops.items[0].count == 1
+
+
+def test_close_returns_a_held_building_to_the_hotbar(window):
+    """Предмет-постройка из руки при закрытии ложится в хотбар — оттуда её ставят."""
+    w, sim, _screen = window
+    sim.inventory.add(LAMP, 2)                   # лежала в рюкзаке
+    w.open_drone(sim)
+    w.click(slot_pos(w, sim, 0, 0), 1, sim)
+    assert w.held.item_id == LAMP and w.held.count == 2
+    w.close(sim)
+    assert w.held is None and not sim.drops.total().get(LAMP)
+    assert sim.hotbar.count(LAMP) == 2 and sim.inventory.count(LAMP) == 0, \
+        "постройка вернулась в хотбар по правилу `Cargo`"
 
 
 def test_close_returns_the_held_stack_to_the_open_lab(window):

@@ -208,6 +208,10 @@ class Renderer:
         self._draw_emissive(target, sim, camera)
         # Луч дрона — аддитивно и поверх тьмы: ночью он виден так же, как днём.
         self.laser.draw(target, camera, sim.drone)
+        # Кольцо разбора — тоже поверх тьмы: разбирают и то, что стоит вне
+        # света дрона (🔧 `BUILD_RANGE` больше его радиуса), и под тьмой кольцо
+        # ночью пропадало вместе со зданием.
+        self._draw_dismantle(target, sim, camera)
         # Призрак постройки — подсказка игроку, а не часть мира: поверх тьмы,
         # иначе ночью нельзя было бы понять, встанет ли здание.
         self.ghost.draw(target, sim, camera, ghost_tile)
@@ -867,6 +871,10 @@ class Renderer:
                                sim.study_target.y + 0.5, sim.study_progress,
                                theme.STUDY_BAR_FG,
                                dy=-int(config.TILE * camera.zoom * 0.66))
+
+    def _draw_dismantle(self, target: pygame.Surface, sim: Simulation,
+                        camera: Camera) -> None:
+        """Кольцо прогресса разбора над целью, пока игрок держит ЛКМ."""
         if sim.dismantle_target is not None and sim.dismantle_progress > 0.0:
             self._dismantle_ring(target, camera, sim.dismantle_target,
                                  sim.dismantle_progress)

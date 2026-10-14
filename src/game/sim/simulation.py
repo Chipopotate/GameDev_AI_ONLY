@@ -328,17 +328,20 @@ class Simulation:
         if target is None or target.depleted or not self.in_mine_range(target):
             self._reset_mining()
             return
-        if target is not self.mine_target:
-            self.mine_target = target
-            self.mine_progress = 0.0
         # Полное хранилище останавливает добычу: ресурс из залежи не пропадает,
         # но и в никуда не девается — игрок освобождает слот и продолжает.
+        # Цель при этом не ставится: иначе луч «жёг» бы залежь, а HUD писал
+        # «Добываю», хотя добычи нет.
         if not self.cargo.can_accept(target.resource_id, config.MINE_YIELD):
+            self.mine_target = None
             self.mine_progress = 0.0
             if self._full_notice != target.resource_id:
                 self._full_notice = target.resource_id
                 self.toast("Инвентарь полон")
             return
+        if target is not self.mine_target:
+            self.mine_target = target
+            self.mine_progress = 0.0
         self.mine_progress += dt / config.MINE_TIME_PER_UNIT
         while self.mine_progress >= 1.0 and target.amount > 0:
             if not self.cargo.can_accept(target.resource_id, config.MINE_YIELD):
@@ -434,7 +437,7 @@ class Simulation:
         if lamp is not None:
             self.light.remove_lamp(lamp)
             self.drops.spawn_tile(BUILD_LAMP, 1, x, y)
-            self.toast(f"{building_def(BUILD_LAMP).name} снята")
+            self.toast(f"Разобрано: {building_def(BUILD_LAMP).name}")
             return True
         building = self.buildings.at(x, y)
         if building is None:
@@ -448,7 +451,7 @@ class Simulation:
         if not self.demolish(building):
             return False
         self.drops.spawn_tile(building.kind, 1, x, y)
-        self.toast(f"{definition.name} разобрана")
+        self.toast(f"Разобрано: {definition.name}")
         return True
 
     # ------------------------------------------------- действие для рендера
@@ -995,11 +998,15 @@ class Simulation:
         """R: повернуть призрак постройки или конвейер под курсором (plan/10).
 
         Призрак важнее: если в слоте здание с направлением, крутится оно —
-        иначе игрок не смог бы поставить линию «поперёк». Когда призрака нет,
-        крутится уже стоящий конвейер: промах исправляется без сноса.
+        иначе игрок не смог бы поставить линию «поперёк». Стоящий конвейер
+        крутится, только когда призрака нет вовсе (слот пуст или в нём не
+        постройка): с лампой в руке R ничего не делает — так записано в
+        plan/10, и у R не бывает двух смыслов сразу.
         """
         kind = self.selected_building()
-        if kind is not None and building_def(kind).work == WORK_MOVE:
+        if kind is not None:
+            if building_def(kind).work != WORK_MOVE:
+                return False
             self.build_rotation = (self.rotation_index(x, y) + 1) % len(DIRECTIONS)
             return True
         return self.rotate_at(x, y)
@@ -1094,7 +1101,10 @@ class Simulation:
         """
         if building_def(building.kind).work != WORK_CRAFT:
             return None
-        known = sorted(r for r in self.knowledge.known_recipes if r in ROLE_IDS)
+        # Фильтр — по роли рецепта, а не по id: у усилителя id «energy+», но
+        # роль та же, и сборщик обязан уметь собирать по нему.
+        known = sorted(r for r in self.knowledge.known_recipes
+                       if self.run.recipe(r).role in ROLE_IDS)
         if not known:
             self.toast("Ни один рецепт ещё не открыт")
             return None

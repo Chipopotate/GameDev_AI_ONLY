@@ -67,6 +67,12 @@ class Game:
                                self.sim.run.items, seed=self.seed)
         self.gallery_visible = False
 
+        #: Нажатие кнопки мыши, уже потраченное на интерфейс или постановку
+        #: (ЛКМ, СКМ, ПКМ): до отпускания оно не превращается в «удержание» в
+        #: мире. Иначе ПКМ, поставившая последний бур, тут же начинала бы скан
+        #: залежи под ним, а ЛКМ, выбравшая слот, — копать (plan/10).
+        self._consumed = [False, False, False]
+
         self.running = True
         self.paused = False
         self.fps = 0.0
@@ -104,12 +110,15 @@ class Game:
                 and not self.sim.building_reachable(self.item_window.building):
             self.item_window.close(self.sim)
         buttons = pygame.mouse.get_pressed()
+        for i in range(min(len(buttons), len(self._consumed))):
+            if not buttons[i]:
+                self._consumed[i] = False
         # Галерея — режим просмотра: под ней по карте не строят и не добывают;
-        # над хотбаром кнопка мыши выбирает слот, а не копает.
+        # над интерфейсом кнопка мыши выбирает слот, а не копает.
         held = (not self.item_window.visible and not self.gallery_visible
                 and not self.hud.over_ui(pygame.mouse.get_pos()))
-        self.sim.set_mining(held and bool(buttons[0]))
-        self.sim.set_scanning(held and bool(buttons[2]))
+        self.sim.set_mining(held and bool(buttons[0]) and not self._consumed[0])
+        self.sim.set_scanning(held and bool(buttons[2]) and not self._consumed[2])
 
     def tile_at_screen(self, pos: tuple[int, int] | None) -> tuple[int, int]:
         """Тайл под экранной точкой (по умолчанию — под курсором)."""
@@ -140,9 +149,14 @@ class Game:
             self._handle_click(event)
 
     def _handle_wheel(self, event: pygame.event.Event) -> None:
-        """Колесо — зум, Shift+колесо листает хотбар (вниз — следующий слот)."""
+        """Колесо — зум, Shift+колесо листает хотбар (вниз — следующий слот).
+
+        На некоторых системах (macOS, тачпады) Shift превращает прокрутку в
+        горизонтальную: тогда шаг берётся из `x`.
+        """
         if pygame.key.get_mods() & pygame.KMOD_SHIFT:
-            self.sim.scroll_hotbar(-int(event.y))
+            step = int(event.y) or int(getattr(event, "x", 0))
+            self.sim.scroll_hotbar(-step)
         else:
             self.camera.zoom_by(event.y)
 
@@ -166,37 +180,42 @@ class Game:
                 pos, self.sim):
             self.ui.blur()
             self.sim.apply(SelectHotbar(slot))
+            self._consume(event.button)
             return
         if self.item_window.visible:
             self.item_window.click(pos, event.button, self.sim, shift=shift, ctrl=ctrl)
+            self._consume(event.button)
             return
         if self.hud.over_ui(pos):
+            self._consume(event.button)
             return
-        if event.button == 3:
-            self.right_click_world(pos)
+        if event.button == 3 and self.right_click_world(pos):
+            self._consume(event.button)
 
-    def right_click_world(self, pos: tuple[int, int]) -> None:
-        """ПКМ по карте (plan/10).
+    def _consume(self, button: int) -> None:
+        """Это нажатие уже что-то сделало: удержанием в мире оно не станет."""
+        index = button - 1
+        if 0 <= index < len(self._consumed):
+            self._consumed[index] = True
+
+    def right_click_world(self, pos: tuple[int, int]) -> bool:
+        """ПКМ по карте (plan/10). True — если клик что-то сделал.
 
         Здание с контейнерами — открыть его окно, что бы ни было в слоте. Иначе
-        постройка в выбранном слоте ставится на тайл (тратится один предмет).
-        Пустой слот или ресурс в слоте — ничего: скан идёт по удержанию ПКМ на
-        залежи, и его ведёт симуляция.
+        постройка в выбранном слоте ставится на тайл (тратится один предмет),
+        если призрак зелёный: проверка та же, что у призрака (`sim.can_place`).
+        Красный призрак, пустой слот или ресурс в слоте — ничего: скан идёт по
+        удержанию ПКМ на залежи, и его ведёт симуляция.
         """
         tile = self.tile_at_screen(pos)
         building = self.sim.buildings.at(*tile)
         if building is not None and building.containers:
             self.open_container(building)
-            return
-        if self.sim.selected_building() is not None:
-            self.sim.apply(PlaceBuilding(self.sim.selected_slot, tile))
-
-    def open_container_at(self, pos: tuple[int, int]) -> bool:
-        """Окно контейнеров здания под экранной точкой (если оно там есть)."""
-        building = self.sim.buildings.at(*self.tile_at_screen(pos))
-        if building is None or not building.containers:
+            return True
+        kind = self.sim.selected_building()
+        if kind is None or not self.sim.can_place(kind, *tile):
             return False
-        return self.open_container(building)
+        return self.sim.apply(PlaceBuilding(self.sim.selected_slot, tile)) is not None
 
     def open_container(self, building) -> bool:
         """ПКМ по зданию: открыть его контейнеры (склад, сборщик, бур, лаборатория)."""
@@ -287,11 +306,14 @@ class Game:
         self.renderer.draw_world(self.screen, self.sim, self.camera,
                                  show_lit_layer=self.debug.show_layers, dt=anim_dt,
                                  ghost_tile=self.ghost_tile())
-        self.hud.draw(self.screen, self.sim, self.camera, self.fps, self.paused,
+        self.hud.draw(self.screen, self.sim, self.camera, self.fps,
                       window_open=self.item_window.visible)
         self.item_window.draw(self.screen, self.sim)
         self.hud.draw_hotbar(self.screen, self.sim,
                              tooltip=self.item_window.held is None)
+        if self.paused:
+            # Поверх окна: пауза работает и с открытым инвентарём, и её видно.
+            self.hud.draw_pause(self.screen)
         if self.gallery_visible:
             self.gallery.draw(self.screen, hint="F4 или Esc — закрыть")
         self.debug.draw(self.screen, self.sim, self.camera, self.renderer,

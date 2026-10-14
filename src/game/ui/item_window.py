@@ -194,9 +194,14 @@ class ItemWindow:
         sim.return_stack(stack, *self._containers(sim))
 
     def _containers(self, sim: Simulation) -> list:
-        """Куда окно возвращает предмет: здание, потом дрон по правилу `Cargo`."""
+        """Куда окно возвращает предмет: здание, потом дрон по правилу `Cargo`.
+
+        Здание — только если оно ещё стоит на карте: снесённое (разбор, на M5 —
+        враги) унесло бы предмет «в руке» вместе с собой, а закон сохранения
+        (plan/03) этого не допускает.
+        """
         out: list = []
-        if self.building is not None:
+        if self.building is not None and self.building in sim.buildings.buildings:
             out.extend(c for c in self.building.containers.values() if c is not None)
         out.append(sim.cargo)
         return out

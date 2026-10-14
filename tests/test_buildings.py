@@ -11,7 +11,7 @@ from src.game.sim.buildings import (SLOT_ANALYZING, SLOT_EMPTY, SLOT_POWER,
 from src.game.sim.research import Knowledge
 from src.game.sim.resources import Stack, give
 from src.game.sim.run_gen import generate_run
-from tests.conftest import SEED, power_grid, stock
+from tests.conftest import SEED, power_grid, slot_of, stock
 
 #: Точное число тиков на один образец: ещё один сверху — на накопление float
 #: (600 тиков дают 0.9999…, и образец закрылся бы только на 601-м).
@@ -231,14 +231,20 @@ def test_state_signature_covers_buildings(lab_system):
 
 
 def test_lab_placed_in_simulation_works_end_to_end():
-    """Полный путь: поставить лабораторию, положить образец, дождаться анализа."""
+    """Полный путь: выбрать слот с лабораторией, поставить её, положить образец,
+    дождаться анализа. Постановка — те же команды, что шлёт интерфейс (ПКМ)."""
+    from src.game.sim.commands import PlaceBuilding, SelectHotbar
     from src.game.sim.simulation import Simulation
 
     sim = stock(Simulation(SEED))
     drone = sim.drone
     x, y = int(drone.x) + 1, int(drone.y)
-    assert sim.select_build(LAB)
-    assert sim.click_at(x, y) == LAB
+    held = sim.cargo.count(LAB)
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, LAB)))
+    assert sim.selected_building() == LAB
+    placed = sim.apply(PlaceBuilding(sim.selected_slot, (x, y)))
+    assert placed is not None and placed.kind == LAB
+    assert sim.cargo.count(LAB) == held - 1, "постановка тратит один предмет"
     power_grid(sim, x, y)                 # лаборатория работает только от сети
     lab = sim.lab_in_range()
     assert lab is not None and sim.building_reachable(lab)

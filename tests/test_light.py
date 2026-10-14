@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.game import config
+from src.game.data.buildings import LAMP
 from src.game.data.terrain import Terrain
 from src.game.sim.light import LightSystem
 from src.game.sim.run_gen import generate_run
@@ -148,7 +149,7 @@ def test_simulation_counts_lamps_as_light():
     assert sim.tiles_lit_ratio == 0.0
     sim.drone.x, sim.drone.y = 6.0, 6.0
     power_grid(sim, 6, 6)                      # лампа горит только от сети (M4)
-    assert sim.place_lamp(6, 6) is not None
+    assert sim.build(LAMP, 6, 6) is not None
     # Генератор зажигает топливо на первом шаге, свет появляется на втором:
     # питание пересчитывается до того, как топка разгорится.
     for _ in range(2):
@@ -157,10 +158,19 @@ def test_simulation_counts_lamps_as_light():
 
 
 def test_lamp_cannot_be_placed_too_far():
+    """Дальность постановки — общий 🔧 `BUILD_RANGE`, отдельного радиуса лампы нет."""
     sim = stock(Simulation(0, world=make_world([[GROUND] * 12 for _ in range(12)])))
     sim.drone.x, sim.drone.y = 1.0, 1.0
-    assert not sim.can_place_lamp(10, 10)
-    assert sim.place_lamp(10, 10) is None
+    assert sim.drone.distance_to_tile(10, 10) > config.BUILD_RANGE
+    assert not sim.can_place(LAMP, 10, 10)
+    lamps = sim.cargo.count(LAMP)
+    assert sim.build(LAMP, 10, 10) is None
+    assert sim.light.lamps == []
+    assert sim.cargo.count(LAMP) == lamps, "отказ не тратит предмет"
+    near = int(config.BUILD_RANGE) - 1          # центр тайла ближе BUILD_RANGE
+    assert sim.drone.distance_to_tile(near, 0) <= config.BUILD_RANGE
+    assert sim.can_place(LAMP, near, 0)
+    assert sim.build(LAMP, near, 0) is not None
 
 
 def test_lamp_cannot_be_placed_on_mountain_or_deposit():
@@ -171,25 +181,30 @@ def test_lamp_cannot_be_placed_on_mountain_or_deposit():
     deposit = Deposit(0, generate_run(0).items.natural_ids[0], 5, 6, 5)
     sim = stock(Simulation(0, world=make_world(rows, [deposit])))
     sim.drone.x, sim.drone.y = 6.5, 5.5
-    assert sim.place_lamp(6, 6) is None, "гора"
-    assert sim.place_lamp(5, 6) is None, "залежь"
-    assert sim.place_lamp(7, 6) is not None, "свободная земля рядом"
-    assert sim.place_lamp(7, 6) is None, "место уже занято лампой"
-    assert sim.remove_lamp_at(7, 6) is True
-    assert sim.remove_lamp_at(7, 6) is False
+    lamps = sim.cargo.count(LAMP)
+    assert sim.build(LAMP, 6, 6) is None, "гора"
+    assert sim.build(LAMP, 5, 6) is None, "залежь"
+    assert sim.cargo.count(LAMP) == lamps, "отказ не тратит предмет"
+    assert sim.build(LAMP, 7, 6) is not None, "свободная земля рядом"
+    assert sim.build(LAMP, 7, 6) is None, "место уже занято лампой"
+    assert sim.cargo.count(LAMP) == lamps - 1, "ушла ровно одна лампа"
+    assert sim.dismantle_building(7, 6) is True
+    assert sim.light.lamp_at(7, 6) is None
+    assert sim.dismantle_building(7, 6) is False, "снимать уже нечего"
 
 
 def test_lamp_placement_changes_state_signature():
     """Лампа входит в слепок состояния, а одинаковые действия дают один слепок."""
     plain = [[GROUND] * 12 for _ in range(12)]
     sim = stock(Simulation(0, world=make_world(plain)))
-    sim.place_lamp(6, 6)
+    assert sim.build(LAMP, 6, 6) is not None
     with_lamp = sim.state_signature()
-    assert sim.remove_lamp_at(6, 6)
+    assert sim.dismantle_building(6, 6)
     assert sim.state_signature() != with_lamp, "лампа в слепке есть"
-    # Тот же забег и те же действия — тот же слепок (снос цены не возвращает).
+    # Тот же забег и те же действия — тот же слепок (тот же запас, та же
+    # потраченная лампа).
     other = stock(Simulation(0, world=make_world([[GROUND] * 12 for _ in range(12)])))
-    other.place_lamp(6, 6)
+    assert other.build(LAMP, 6, 6) is not None
     assert other.state_signature() == with_lamp
 
 

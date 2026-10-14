@@ -1,13 +1,16 @@
 """Скриншоты сцен без окна (plan/09 §12).
 
 Агент обязан **смотреть** результат, а не верить коду: инструмент рендерит
-четыре сцены в `screens/`, и по ним проверяется стиль (свой/чужой, силуэты,
-неон в темноте, читаемость состояний, отсутствие визуального мусора).
+сцены в `screens/`, и по ним проверяется стиль (свой/чужой, силуэты, неон в
+темноте, читаемость состояний, отсутствие визуального мусора).
 
 Запуск:
-    py tools/screenshot.py                 # все четыре сцены, сид по умолчанию
-    py tools/screenshot.py --scene night   # только одна
+    py tools/screenshot.py                 # все сцены, сид по умолчанию
+    py tools/screenshot.py --scene night   # только одна (можно несколько --scene)
     py tools/screenshot.py --seed 42 --out screens
+
+Сцена может отдать несколько кадров (кадры подряд): тогда файлов несколько,
+у каждого своё имя (`laser_mine_f1.png` …).
 
 Сцены:
     gallery — вся сетка спрайтов в 3× с подписями (plan/09 §12.1);
@@ -18,6 +21,27 @@
     foes    — силуэты врагов и частицы (§12.4, заготовка: врагов в симуляции
               ещё нет — M5, поэтому на кадр кладутся сами спрайты из
               `render/sprites/organic.py`).
+
+Призрак постройки и лазеры дрона (plan/10, plan/09 §10). Ввод — настоящий:
+игра сама читает мышь (`Game.poll_input`, `Game.ghost_tile`), а на время
+съёмки подменяются только `pygame.mouse.get_pos/get_pressed` (см. `Pointer`):
+курсор «держится» за тайл, кнопки зажаты по сценарию. Клавиши (1…9, R) идут
+событиями через `Game.handle_event`.
+
+    ghost_ok        — зелёный призрак склада у дрона, днём;
+    ghost_bad       — красный призрак лампы на горе (в радиусе), днём;
+    ghost_far       — красный призрак вне 🔧 `BUILD_RANGE`: видно кольцо дальности;
+    ghost_night     — зелёный призрак лампы ночью: читается ли он в темноте;
+    ghost_conveyor  — призрак конвейера с шевронами, повёрнутый R, рядом лента;
+    laser_mine      — ночь, ЛКМ по залежи: красный луч;
+    laser_mine_day  — то же днём;
+    laser_mine_f    — ночь, три кадра подряд (`laser_mine_f1…f3`): переливание;
+    laser_dismantle — ночь, ЛКМ по своему складу вдали от дрона: луч и кольцо
+                      прогресса; второй кадр `dismantle_drop` — что осталось;
+    laser_study     — ночь, ЛКМ по реликвии: синий луч;
+    laser_scan      — ночь, ПКМ по залежи с пустым слотом: синий скан;
+    laser_scan_day  — то же днём;
+    laser_low       — ночь, добыча на `low`: простая линия без ореола.
 
 Файлы пишутся без окна: SDL переводится в dummy-режим до импорта pygame.
 """
@@ -36,19 +60,21 @@ if str(ROOT) not in sys.path:            # запуск как `py tools/screens
     sys.path.insert(0, str(ROOT))
 
 import argparse  # noqa: E402
+import math  # noqa: E402
 import random  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pygame  # noqa: E402
 
 from src.game import config  # noqa: E402
-from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR,  # noqa: E402
-                                     LAB, LAMP, STORAGE, WIRE,
-                                     building as building_def)
-from src.game.data.recipes import ROLES  # noqa: E402
+from src.game.data.buildings import (ASSEMBLER, BUILD_ORDER, CONVEYOR,  # noqa: E402
+                                     DRILL, GENERATOR, LAB, LAMP, STORAGE,
+                                     WIRE, building as building_def)
+from src.game.data.recipes import ROLES, role as role_def  # noqa: E402
 from src.game.data.resources import Prop  # noqa: E402
 from src.game.data.terrain import Terrain  # noqa: E402
-from src.game.render import theme  # noqa: E402
+from src.game.render import quality, theme  # noqa: E402
 from src.game.render.sprites import organic  # noqa: E402
 from src.game.render.effects import RING, SMOKE, SPARK  # noqa: E402
 from src.game.ui import widgets  # noqa: E402
@@ -98,6 +124,30 @@ FOE_NAMES = {
     organic.ARTILLERY: "артиллерия", organic.SPROUT: "росток",
     organic.INCUBATOR: "инкубатор", organic.SPIKE: "нарост",
 }
+#: Пустой слот хотбара для старых сцен: запас построек (`_stock`) занимает
+#: первые восемь слотов, а с постройкой в руке под курсором висел бы призрак.
+EMPTY_SLOT_KEY = pygame.K_1 + len(BUILD_ORDER)
+#: Где встать дрону у цели, тайлы от её центра: чуть ближе каждого радиуса
+#: действия (🔧 `MINE_RANGE`, `RELIC_STUDY_RANGE`, `SCAN_RANGE`).
+MINE_STAND = 1.3
+STUDY_STAND = 1.4
+SCAN_STAND = 2.0
+#: Склад под разбор — дальше света дрона (🔧 `DRONE_LIGHT_RADIUS` = 4), но в
+#: `BUILD_RANGE`: луч и кольцо проверяются в настоящей темноте.
+DISMANTLE_OFFSET = (5, -1)
+#: Призраки: смещение тайла от дрона. «Далеко» — за кольцом `BUILD_RANGE`.
+GHOST_NEAR = (2, -1)
+GHOST_FAR = (8, 1)
+#: Лента рядом с призраком конвейера: (dx, dy) от дрона, везёт на восток. Её
+#: шевроны — эталон, с которым сравнивается повёрнутый призрак.
+BELT_ROW = ((-2, 2), (-1, 2), (0, 2), (1, 2), (2, 2))
+#: Сколько удерживать кнопку до снимка — доля времени действия: середина,
+#: когда видно и луч, и прогресс, а действие ещё не закончилось.
+HOLD_SHARE = 0.55
+#: Кадров подряд для проверки переливания красного луча.
+FLICKER_FRAMES = 3
+#: Энергия для скана: 🔧 `SCAN_ENERGY_COST` за скан, с запасом на всю сцену.
+SCAN_ENERGY = 40
 
 
 # ------------------------------------------------------------------- сцены
@@ -134,15 +184,13 @@ def shot_base(game, seed: int) -> pygame.Surface:
     cx, cy = int(sim.drone.x), int(sim.drone.y)
     for kind, dx, dy, direction in BASE_LAYOUT:
         x, y = cx + dx, cy + dy
-        if kind == LAMP:
-            sim.place_lamp(x, y)
-            continue
         building = sim.build(kind, x, y, direction=direction)
         if building is not None and kind == GENERATOR:
             _fuel(sim, building)
     for _ in range(3):
         sim.update(config.TICK)
     sim.toasts.clear()
+    _press(game, EMPTY_SLOT_KEY)
     game.camera.set_zoom(BASE_ZOOM)
     return _frame(game, snap=(sim.drone.x, sim.drone.y))
 
@@ -155,6 +203,7 @@ def shot_night(game, seed: int) -> pygame.Surface:
     for _ in range(3):                    # сеть пересчитывается на шаге симуляции
         sim.update(config.TICK)
     sim.toasts.clear()                    # сообщения о стройке закрыли бы кадр
+    _press(game, EMPTY_SLOT_KEY)
     return _frame(game, snap=(sim.drone.x, sim.drone.y))
 
 
@@ -191,6 +240,147 @@ def shot_foes(game, seed: int) -> pygame.Surface:
     return screen
 
 
+# ------------------------------------------------- призрак постройки
+def shot_ghost_ok(game, seed: int) -> pygame.Surface:
+    """5а. Зелёный призрак: склад на свободной земле рядом с дроном, днём."""
+    sim = game.sim
+    tile = _offset_tile(sim, GHOST_NEAR)
+    return _ghost(game, STORAGE, tile, expect_ok=True)
+
+
+def shot_ghost_bad(game, seed: int) -> pygame.Surface:
+    """5б. Красный призрак: лампа на горе у края стартовой зоны (в радиусе).
+
+    Дрон встаёт у кромки гор: только так «нельзя» вызвано тайлом, а не
+    дальностью, — это проверка цвета призрака, а не кольца.
+    """
+    sim = game.sim
+    stand, tile = _mountain_edge(sim)
+    _teleport(game, *stand, face=tile)
+    return _ghost(game, LAMP, tile, expect_ok=False)
+
+
+def shot_ghost_far(game, seed: int) -> pygame.Surface:
+    """5в. Красный призрак за кольцом дальности: земля свободна, но далеко."""
+    sim = game.sim
+    tile = _offset_tile(sim, GHOST_FAR)
+    _check(sim._tile_ok_for(STORAGE, *tile) and not sim.in_build_range(*tile),
+           f"тайл {tile} должен быть свободной землёй вне BUILD_RANGE")
+    return _ghost(game, STORAGE, tile, expect_ok=False)
+
+
+def shot_ghost_night(game, seed: int) -> pygame.Surface:
+    """5г. Призрак ночью: подсказка рисуется поверх тьмы и обязана читаться."""
+    game.skip_to_night()
+    tile = _offset_tile(game.sim, GHOST_NEAR)
+    return _ghost(game, LAMP, tile, expect_ok=True)
+
+
+def shot_ghost_conveyor(game, seed: int) -> pygame.Surface:
+    """5д. Призрак конвейера: по умолчанию «от дрона» (восток), R — на юг.
+
+    Рядом стоит настоящая лента на восток: по ней видно, что шевроны
+    призрака — та же подсказка направления, но повёрнутая клавишей R.
+    """
+    sim = game.sim
+    cx, cy = int(sim.drone.x), int(sim.drone.y)
+    for dx, dy in BELT_ROW:
+        sim.cargo.add(CONVEYOR, 1)
+        _check(sim.build(CONVEYOR, cx + dx, cy + dy, direction=EAST) is not None,
+               "лента рядом с призраком не встала")
+    sim.toasts.clear()
+    tile = _offset_tile(sim, GHOST_NEAR)
+    with _pointer(game) as mouse:
+        mouse.tile = tile
+        sim.cargo.add(CONVEYOR, 1)
+        _press(game, pygame.K_1 + _slot_of(sim, CONVEYOR))
+        before = sim.ghost_direction(*tile)
+        _press(game, pygame.K_r)               # настоящая клавиша, через Game
+        after = sim.ghost_direction(*tile)
+        _check(before == EAST and after == (0, 1),
+               f"R должен повернуть призрак с востока на юг: {before} → {after}")
+        _play(game, WARMUP)
+        _check(sim.can_place(CONVEYOR, *tile), "призрак конвейера должен быть зелёным")
+        return game.screen.copy()
+
+
+# ------------------------------------------------------------- лазеры
+def shot_laser_mine(game, seed: int) -> pygame.Surface:
+    """6а. Ночь, ЛКМ по залежи: красный «жгущий» луч и искры."""
+    game.skip_to_night()
+    return _mine(game)
+
+
+def shot_laser_mine_day(game, seed: int) -> pygame.Surface:
+    """6б. Добыча днём: на светлой земле луч не должен теряться."""
+    return _mine(game)
+
+
+def shot_laser_mine_frames(game, seed: int) -> list[tuple[str, pygame.Surface]]:
+    """6в. Три кадра подряд (1/60 с): бегущие по лучу волны яркости."""
+    game.skip_to_night()
+    return _mine(game, frames=FLICKER_FRAMES)
+
+
+def shot_laser_low(game, seed: int) -> pygame.Surface:
+    """6г. `low`: луч — простая линия без ореола (plan/09 §3.7)."""
+    game.skip_to_night()
+    with quality.override(quality.LOW):
+        return _mine(game)
+
+
+def shot_laser_dismantle(game, seed: int) -> list[tuple[str, pygame.Surface]]:
+    """6д. Ночь, ЛКМ по своему складу: красный луч и кольцо прогресса.
+
+    Склад стоит дальше света дрона: луч идёт через настоящую темноту. Второй
+    кадр — после конца разбора: здание стало предметом на своём тайле.
+    """
+    sim = game.sim
+    game.skip_to_night()
+    tile = _offset_tile(sim, DISMANTLE_OFFSET)
+    sim.cargo.add(STORAGE, 1)
+    building = sim.build(STORAGE, *tile)
+    _check(building is not None, f"склад на {tile} не встал")
+    sim.toasts.clear()
+    hold = _hold_frames(config.DISMANTLE_TIME)
+    with _pointer(game) as mouse:
+        mouse.tile = tile
+        _check(sim.selected_building() is None, "рука должна быть пустой")
+        _play(game, WARMUP)
+        mouse.left = True
+        _play(game, hold)
+        _check(sim.drone.action.kind == "dismantle" and sim.buildings.at(*tile),
+               "дрон должен разбирать склад")
+        shot = game.screen.copy()
+        _play(game, _hold_frames(config.DISMANTLE_TIME, 1.0) - hold + 2)
+        mouse.left = False
+        _play(game, 12)                        # луч угас, дрон отпустил кнопку
+        _check(sim.buildings.at(*tile) is None, "склад должен был разобраться")
+        return [("laser_dismantle", shot), ("dismantle_drop", game.screen.copy())]
+
+
+def shot_laser_study(game, seed: int) -> pygame.Surface:
+    """6е. Ночь, ЛКМ по реликвии: синий «читающий» луч и кольцо-сканер."""
+    sim = game.sim
+    game.skip_to_night()
+    relic = min((r for r in sim.relics if not r.studied and not r.amplified),
+                key=lambda r: sim.drone.distance_to_tile(r.x, r.y))
+    tile = (relic.x, relic.y)
+    _teleport(game, *_stand_by(sim, tile, STUDY_STAND), face=tile)
+    return _hold(game, tile, config.RELIC_STUDY_TIME, "study")
+
+
+def shot_laser_scan(game, seed: int) -> pygame.Surface:
+    """6ж. Ночь, ПКМ по залежи с пустым слотом: синий скан (тратит энергию)."""
+    game.skip_to_night()
+    return _scan(game)
+
+
+def shot_laser_scan_day(game, seed: int) -> pygame.Surface:
+    """6з. Скан днём: синий луч на светлой земле — самый трудный случай."""
+    return _scan(game)
+
+
 SCENES = {
     "gallery": shot_gallery,
     "terrain": shot_terrain,
@@ -198,7 +388,207 @@ SCENES = {
     "base": shot_base,
     "night": shot_night,
     "foes": shot_foes,
+    "ghost_ok": shot_ghost_ok,
+    "ghost_bad": shot_ghost_bad,
+    "ghost_far": shot_ghost_far,
+    "ghost_night": shot_ghost_night,
+    "ghost_conveyor": shot_ghost_conveyor,
+    "laser_mine": shot_laser_mine,
+    "laser_mine_day": shot_laser_mine_day,
+    "laser_mine_f": shot_laser_mine_frames,
+    "laser_dismantle": shot_laser_dismantle,
+    "laser_study": shot_laser_study,
+    "laser_scan": shot_laser_scan,
+    "laser_scan_day": shot_laser_scan_day,
+    "laser_low": shot_laser_low,
 }
+
+
+# ----------------------------------------------------------- ввод для съёмки
+class Pointer:
+    """Мышь на время съёмки: курсор над тайлом, кнопки зажаты по сценарию.
+
+    Кадр обязан быть честным — игра сама читает мышь (`Game.poll_input`,
+    `Game.ghost_tile`, подсказки HUD), поэтому подменяется только то, что
+    отдаёт pygame. Курсор держится за **мировой** тайл: камера каждый кадр
+    подтягивается за дроном, и экранная точка пересчитывается от неё — как
+    если бы игрок вёл мышью за целью.
+    """
+
+    def __init__(self, game) -> None:
+        self.game = game
+        self.tile: tuple[int, int] | None = None
+        self.left = False
+        self.right = False
+        self._real_pos = pygame.mouse.get_pos
+
+    def get_pos(self) -> tuple[int, int]:
+        if self.tile is None:
+            return self._real_pos()
+        sx, sy = self.game.camera.world_to_screen(self.tile[0] + 0.5, self.tile[1] + 0.5)
+        return int(sx), int(sy)
+
+    def get_pressed(self, num_buttons: int = 3, desktop: bool = False):
+        buttons = (self.left, False, self.right)
+        return buttons if num_buttons == 3 else buttons + (False, False)
+
+
+@contextmanager
+def _pointer(game):
+    """Подменяет `pygame.mouse.get_pos/get_pressed` на время сцены."""
+    mouse = pygame.mouse
+    saved = mouse.get_pos, mouse.get_pressed
+    pointer = Pointer(game)
+    mouse.get_pos, mouse.get_pressed = pointer.get_pos, pointer.get_pressed
+    try:
+        yield pointer
+    finally:
+        mouse.get_pos, mouse.get_pressed = saved
+
+
+def _press(game, key: int) -> None:
+    """Нажатие клавиши — событием, через тот же обработчик, что в игре."""
+    game.handle_event(pygame.event.Event(pygame.KEYDOWN, key=key, mod=0,
+                                         unicode="", scancode=0))
+
+
+def _play(game, frames: int) -> None:
+    """Кадры игры как в `Game.run`: опрос ввода, шаг, отрисовка (без flip)."""
+    for _ in range(max(0, frames)):
+        game.poll_input()
+        game.draw_frame(config.TICK)
+
+
+def _hold_frames(seconds: float, share: float = HOLD_SHARE) -> int:
+    """Сколько кадров держать кнопку, чтобы действие дошло до доли `share`."""
+    return max(1, int(round(seconds * share / config.TICK)))
+
+
+# ------------------------------------------------------- сценарии сцен
+def _ghost(game, kind: str, tile: tuple[int, int], expect_ok: bool) -> pygame.Surface:
+    """Постройка в руке, курсор над тайлом: призрак рисует сама игра."""
+    sim = game.sim
+    sim.cargo.add(kind, 3)
+    with _pointer(game) as mouse:
+        mouse.tile = tile
+        _press(game, pygame.K_1 + _slot_of(sim, kind))
+        _check(sim.selected_building() == kind, f"в руке должен быть {kind}")
+        _play(game, WARMUP)
+        _check(game.ghost_tile() == tuple(tile), "призрак должен стоять под курсором")
+        _check(sim.can_place(kind, *tile) == expect_ok,
+               f"призрак {kind} на {tile}: ожидалось can_place={expect_ok}")
+        return game.screen.copy()
+
+
+def _mine(game, frames: int = 1):
+    """ЛКМ по ближайшей залежи: луч добычи. `frames` > 1 — кадры подряд."""
+    sim = game.sim
+    deposit = _nearest_deposit(sim)
+    tile = (deposit.x, deposit.y)
+    _teleport(game, *_stand_by(sim, tile, MINE_STAND), face=tile)
+    return _hold(game, tile, config.MINE_TIME_PER_UNIT, "mine", frames=frames)
+
+
+def _scan(game) -> pygame.Surface:
+    """ПКМ по залежи: рука пуста, энергия в инвентаре — скан идёт."""
+    sim = game.sim
+    sim.cargo.add(role_def("energy").id, SCAN_ENERGY)
+    deposit = _nearest_deposit(sim)
+    tile = (deposit.x, deposit.y)
+    _teleport(game, *_stand_by(sim, tile, SCAN_STAND), face=tile)
+    return _hold(game, tile, config.SCAN_TIME, "scan", button="right")
+
+
+def _hold(game, tile: tuple[int, int], seconds: float, kind: str,
+          button: str = "left", frames: int = 1):
+    """Прогрев без действия, потом кнопка зажата до середины действия.
+
+    Прогрев отдельно: кольца и дым от телепорта камеры и постановки гаснут, а
+    сама работа (разбор, изучение) за 70 кадров уже закончилась бы.
+    """
+    sim = game.sim
+    sim.toasts.clear()
+    with _pointer(game) as mouse:
+        mouse.tile = tile
+        _check(sim.selected_building() is None, "рука должна быть пустой")
+        _play(game, WARMUP)
+        setattr(mouse, button, True)
+        _play(game, _hold_frames(seconds))
+        _check(sim.drone.action.kind == kind,
+               f"действие дрона должно быть {kind}, а не {sim.drone.action.kind}")
+        if frames <= 1:
+            return game.screen.copy()
+        shots = [("laser_mine_f1", game.screen.copy())]
+        for i in range(2, frames + 1):
+            _play(game, 1)
+            shots.append((f"laser_mine_f{i}", game.screen.copy()))
+        return shots
+
+
+# ---------------------------------------------------------- места на карте
+def _check(ok: bool, text: str) -> None:
+    """Сцена обязана быть той, за которую себя выдаёт: иначе снимок врёт."""
+    if not ok:
+        raise RuntimeError(f"сцена не та: {text}")
+
+
+def _offset_tile(sim, offset: tuple[int, int]) -> tuple[int, int]:
+    return int(sim.drone.x) + offset[0], int(sim.drone.y) + offset[1]
+
+
+def _slot_of(sim, item_id: str) -> int:
+    """Слот хотбара с предметом: выбирается клавишей 1…9, как у игрока."""
+    for i in range(sim.hotbar.size):
+        stack = sim.hotbar.slot(i)
+        if stack is not None and stack.item_id == item_id:
+            return i
+    raise RuntimeError(f"сцена не та: {item_id} не лёг в хотбар")
+
+
+def _nearest_deposit(sim):
+    drone = sim.drone
+    return min((d for d in sim.world.deposits if not d.depleted),
+               key=lambda d: drone.distance_to_tile(d.x, d.y))
+
+
+def _stand_by(sim, tile: tuple[int, int], dist: float) -> tuple[float, float]:
+    """Где встать дрону в `dist` тайлах от цели — со стороны, откуда он пришёл.
+
+    Перебираются направления, начиная с «к дрону»: место должно быть
+    проходимым для корпуса и не лежать на залежи или реликвии.
+    """
+    tx, ty = tile[0] + 0.5, tile[1] + 0.5
+    base = math.atan2(sim.drone.y - ty, sim.drone.x - tx)
+    world = sim.world
+    for i in range(16):
+        a = base + (i + 1) // 2 * (math.pi / 8) * (1 if i % 2 else -1)
+        x, y = tx + math.cos(a) * dist, ty + math.sin(a) * dist
+        if world.circle_hits_blocked(x, y, sim.drone.radius):
+            continue
+        cx, cy = int(math.floor(x)), int(math.floor(y))
+        if world.deposit_at(cx, cy) is None and sim.run.relic_at(cx, cy) is None:
+            return x, y
+    raise RuntimeError(f"сцена не та: рядом с {tile} негде встать")
+
+
+def _mountain_edge(sim) -> tuple[tuple[float, float], tuple[int, int]]:
+    """Кромка гор на ряду дрона: (где встать, тайл горы в 3 тайлах от дрона)."""
+    world = sim.world
+    x, y = int(sim.drone.x), int(sim.drone.y)
+    while world.is_walkable_tile(x - 1, y):
+        x -= 1
+    _check(world.in_bounds(x - 1, y), "на ряду дрона нет гор")
+    return (x + 2.5, y + 0.5), (x - 1, y)
+
+
+def _teleport(game, x: float, y: float, face: tuple[int, int] | None = None) -> None:
+    """Дрон на место сцены, лицом к цели: будто игрок подлетел к ней сам."""
+    drone = game.sim.drone
+    drone.x, drone.y = x, y
+    if face is not None:
+        drone.facing = math.atan2(face[1] + 0.5 - y, face[0] + 0.5 - x)
+    game.camera.snap_to(x, y)
+    game.camera.clamp_to(game.sim.world.width, game.sim.world.height)
 
 
 # ---------------------------------------------------------------- подготовка
@@ -239,9 +629,16 @@ def _shore_tile(world) -> tuple[float, float]:
 
 
 def _stock(sim, count: int = 40) -> None:
-    """Запас материалов: сцена ставится так, как её поставил бы игрок."""
+    """Запас: материалы ролей и по стаку каждого предмета-постройки.
+
+    Здание ставится только из предмета (plan/03), поэтому сцена получает те же
+    предметы, что игрок скрафтил бы: постройки ложатся в хотбар, роли — в
+    инвентарь (правило `Cargo`).
+    """
     for role in ROLES:
-        sim.inventory.add(role.id, count)
+        sim.cargo.add(role.id, count)
+    for kind in BUILD_ORDER:
+        sim.cargo.add(kind, config.BUILDING_STACK)
 
 
 def _place_base(sim) -> None:
@@ -268,7 +665,7 @@ def _place_base(sim) -> None:
         if kind == GENERATOR:
             _fuel(sim, building)
     for x in row:                         # лампы вплотную к полосе — та же сеть
-        sim.place_lamp(x, y - 1)
+        sim.build(LAMP, x, y - 1)
     for gx, gy in _generator_spots(x0, y):
         if _powered(sim):
             break
@@ -345,12 +742,15 @@ def main(argv: list[str] | None = None) -> int:
     for name in names:
         game = app.Game(seed=args.seed)
         try:
-            surface = SCENES[name](game, args.seed)
-            path = out / f"{name}.png"
-            pygame.image.save(surface, str(path))     # сохраняем, пока жив дисплей
+            result = SCENES[name](game, args.seed)
+            # Сцена отдаёт один кадр или несколько с именами (кадры подряд).
+            shots = result if isinstance(result, list) else [(name, result)]
+            for shot_name, surface in shots:
+                path = out / f"{shot_name}.png"
+                pygame.image.save(surface, str(path))  # сохраняем, пока жив дисплей
+                print(f"{shot_name}: {path} {surface.get_width()}x{surface.get_height()}")
         finally:
             game.close()
-        print(f"{name}: {path} {surface.get_width()}x{surface.get_height()}")
     return 0
 
 

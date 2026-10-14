@@ -23,15 +23,18 @@ import pygame
 import pytest
 
 from src.game import config
+from src.game.data.buildings import GENERATOR, LAMP, building as building_def
+from src.game.data.resources import Prop
 from src.game.render import quality, theme
 from src.game.render.camera import Camera
 from src.game.render.renderer import Renderer
 from src.game.render.sprites import SpriteCache, organic
 from src.game.render.sprites.gems import (HUE_MIN_DISTANCE, SILHOUETTE_MAX_IOU,
                                           hue_distance, mask_iou)
+from src.game.sim.buildings import DIRECTIONS
 from src.game.sim.run_gen import generate_run
 from src.game.sim.simulation import Simulation
-from tests.conftest import SEED, STOCK_COUNT, power_lamp, stock
+from tests.conftest import SEED, STOCK_COUNT, place, stock
 
 #: Размер спрайта в проверках различимости: вдвое крупнее игрового тайла.
 #: Мелкий значок размывает силуэт, и различие «на глаз» пропадает раньше, чем
@@ -85,10 +88,35 @@ def lamps_around(sim: Simulation, count: int) -> list:
                 return lamps
             if abs(dx) < 2 and abs(dy) < 2:
                 continue                      # под дроном лампе места нет
-            if not sim.can_place_lamp(sx + dx, sy + dy):
+            if not sim.can_place(LAMP, sx + dx, sy + dy):
                 continue                      # залежь, гора или уже занято
-            lamps.append(power_lamp(sim, sx + dx, sy + dy))
+            lamps.append(lit_lamp(sim, sx + dx, sy + dy))
     return lamps
+
+
+def lit_lamp(sim: Simulation, x: int, y: int):
+    """Горящая лампа на (x, y): предмет-лампа и рядом заправленный генератор.
+
+    То же, что `power_lamp` из conftest, но без `stock` на каждую лампу: тот
+    выдаёт по стаку всех построек, и уже на второй лампе запас в хранилище
+    дрона не влезает. Здесь ламп несколько, а от каждой нужен только свет —
+    поэтому выдаются ровно лампа и генератор.
+    """
+    lamp = place(sim, LAMP, x, y)
+    assert lamp is not None, f"лампа не встала на {x}, {y}"
+    for dx, dy in DIRECTIONS:
+        if not sim.can_place(GENERATOR, x + dx, y + dy):
+            continue
+        generator = place(sim, GENERATOR, x + dx, y + dy)
+        fuel = sim.run.items.with_prop(Prop.FLAMMABLE)[0].id
+        generator.container(building_def(GENERATOR).accept_id).add(fuel, STOCK_COUNT)
+        break
+    else:
+        raise AssertionError(f"рядом с лампой {x}, {y} нет места под генератор")
+    for _ in range(2):                         # топка разгорается, сеть раздаёт
+        sim.update(config.TICK)
+    assert lamp.on, "лампа не загорелась от генератора"
+    return lamp
 
 
 def body_pixels(surf: pygame.Surface) -> np.ndarray:

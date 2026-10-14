@@ -180,6 +180,8 @@ def _make_halo(radius: int, color, inner: float, peak: float,
     k = np.clip(k, 0.0, 1.0) ** 1.35          # чуть резче к краю — свет не «мылит»
     arr = pygame.surfarray.pixels3d(surf)
     for ch in range(3):
-        arr[..., ch] = (color[ch] * peak * k / 255.0).astype(np.uint8).T
+        # `peak` — доля 0..1, а цвет уже 0..255: делить на 255 ещё раз нельзя,
+        # иначе ореол выходит чёрным (так и было до M4.6 — свечения не было видно).
+        arr[..., ch] = np.clip(color[ch] * peak * k, 0, 255).astype(np.uint8).T
     del arr
     return surf

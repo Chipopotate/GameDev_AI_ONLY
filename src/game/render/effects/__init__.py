@@ -42,6 +42,13 @@ SIZE_GRADES = (0.7, 0.85, 1.0, 1.15, 1.3)
 #: Ореол искры в долях её размера: `size` задан в тайлах, и искра в 2 тайла
 #: без этого множителя давала ореол радиусом в два тайла — пятно, а не искру.
 SPARK_SCALE = 0.25
+#: Осколок разрушения, в тайлах: 2.4 давало треугольники радиусом ~77 px,
+#: которые закрывали полэкрана вокруг здания.
+SHARD_SIZE = 0.3
+#: Искры добычи — мелкие «крошки» в цвете ресурса: у луча дрона свои искры
+#: (`effects/laser.py`), и крупные искры здесь превращали залежь в белый диск.
+MINE_SPARK_SIZE = 0.6
+MINE_SPARK_HZ = 8.0
 
 
 class Particle:
@@ -194,6 +201,7 @@ class EffectsDirector:
         self._inventory_total = 0
         self._building_ids: dict[int, tuple[int, int, str, str]] = {}
         self._mined_total = 0
+        self._dismantling: int | None = None
         self._shake = 0.0
         self.events = 0
 
@@ -231,18 +239,31 @@ class EffectsDirector:
                 continue
             self.events += 1
             cx, cy = x + 0.5, y + 0.5
-            self.pool.burst(SHARD, cx, cy, 8, 2.6, 0.7, 2.4, theme.STEEL_LIGHT,
+            if bid == self._dismantling:
+                # Разбор игроком — спокойная работа, а не катастрофа: короткая
+                # вспышка и немного дыма, без осколков и тряски (plan/09 §10:
+                # «стройка/снос» и «разрушение» — разные эффекты).
+                self.pool.spawn(RING, cx, cy, 0.0, 0.0, 0.30, 0.9, theme.DISMANTLE_RING)
+                self.pool.burst(SMOKE, cx, cy, 4, 0.9, 0.5, 0.8, (0, 0, 0), self.rng, 2.4)
+                continue
+            # Разрушение (на M5 — врагами): осколки, дым и встряска экрана.
+            self.pool.burst(SHARD, cx, cy, 8, 2.6, 0.7, SHARD_SIZE, theme.STEEL_LIGHT,
                             self.rng, 1.4)
             self.pool.burst(SMOKE, cx, cy, 8, 1.4, 0.9, 1.2, (0, 0, 0), self.rng, 2.4)
             self.add_shake(config.SCREEN_SHAKE_MAX * 0.35)
         self._building_ids = seen
+        # Что разбирается сейчас: здание исчезнет на следующем шаге, и по этому
+        # id эффект узнает, что это разбор, а не разрушение.
+        target = sim.dismantle_target
+        self._dismantling = getattr(target, "id", None) \
+            if target in sim.buildings.buildings else None
 
     def _watch_mining(self, sim, dt: float) -> None:
         """Добыча: искры из залежи, пока идёт цикл."""
         target = sim.mine_target
         if target is None or sim.mine_progress <= 0.0:
             return
-        rate = 18.0 * dt
+        rate = MINE_SPARK_HZ * dt
         while rate > 0.0:
             if rate < 1.0 and self.rng.random() > rate:
                 break
@@ -252,11 +273,17 @@ class EffectsDirector:
             color = _item_color(sim, target.resource_id)
             self.pool.spawn(SPARK, target.x + 0.5, target.y + 0.5,
                             math.cos(a) * speed, math.sin(a) * speed,
-                            self.rng.uniform(0.25, 0.5), 2.0, color, drag=1.6)
+                            self.rng.uniform(0.25, 0.5), MINE_SPARK_SIZE, color,
+                            drag=1.6)
 
     def _watch_inventory(self, sim) -> None:
-        """Подбор предмета: светлячки летят к дрону."""
-        total = sum(count for _id, count in sim.inventory.items())
+        """Подбор предмета: светлячки летят к дрону.
+
+        Считается всё хранилище дрона (`Cargo`): иначе подбор постройки в хотбар
+        не светился бы, а перекладывание хотбар → инвентарь в окне выглядело бы
+        как подбор.
+        """
+        total = sim.cargo.total_count()
         if total > self._inventory_total:
             gained = min(6, total - self._inventory_total)
             drone = sim.drone

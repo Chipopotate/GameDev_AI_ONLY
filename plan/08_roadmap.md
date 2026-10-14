@@ -189,10 +189,16 @@
 `sim/run_gen.py: craftable_at_start`. UI: `ui/state.py` (`text_input_active`), `ui/controls.py`
 (таблица клавиш), `ui/hotbar.py`, `ui/craft_panel.py`, окно E в `ui/item_window.py`;
 `ui/recipe_book.py` удалена. Рендер: `render/effects/laser.py` (`render/effects` стал пакетом),
-`render/ghost.py`, значок постройки = спрайт здания (`render/icons.py`). Всего N тестов, новые — в
-`tests/test_hotbar_building.py`, `test_craft_panel.py`, `test_laser.py`, `test_controls.py`.
+`render/ghost.py`, значок постройки = спрайт здания (`render/icons.py`). Всего 604 теста
+(`pytest -q`, ~29 с в Linux-контейнере агента), новые — в `tests/test_hotbar_building.py`,
+`test_craft_panel.py`, `test_laser.py`, `test_controls.py`.
 Скриншоты — `tools/screenshot.py`, сцены `ghost_*`, `laser_*`, `dismantle_drop` в `screens/`.
-Замер `--bench 300` в Linux-контейнере агента: день ~400 FPS (2.5 мс), ночь ~220 FPS (4.5 мс).*
+Замер `SDL_VIDEODRIVER=dummy python3 main.py --headless --bench 300` в Linux-контейнере агента:
+300 кадров, в среднем 2.32 мс (431 FPS), с `--night` — 5.30 мс (188 FPS); с запасом выше 60 FPS.*
+*После ревью исправлены, в том числе, чёрные ореолы свечения (лишнее деление на 255 в
+`factory._make_halo`; яркости пересняты по скриншотам), сборщик снова берёт усилители, разбор
+отделён от разрушения по эффектам, потраченное на интерфейс нажатие не становится удержанием —
+список в Changelog v1.2 (`00_overview.md`).*
 *Решения этого билда (подробнее в `README.md`): предметы на земле под новым зданием остаются
 лежать и подбираются обычным образом; разобранная постройка падает на землю, а не в инвентарь;
 «доступно» в панели считается по открытым свойствам, а крафт — по настоящим (❓ в `02`); цены

@@ -254,8 +254,11 @@ class Game:
         elif key == pygame.K_r:
             # R — поворот на 90° по часовой: призрак, а без него — конвейер под
             # курсором. Иначе ничего (plan/10).
-            if not self.item_window.visible and not self.gallery_visible:
-                self.sim.rotate_preview(*self.tile_at_screen(None))
+            # Над панелями HUD мира не видно — и крутить там нечего (plan/10).
+            mouse = pygame.mouse.get_pos()
+            if not self.item_window.visible and not self.gallery_visible \
+                    and not self.hud.over_ui(mouse):
+                self.sim.rotate_preview(*self.tile_at_screen(mouse))
         elif key in HOTBAR_KEYS:
             self.sim.apply(SelectHotbar(HOTBAR_KEYS[key]))
         elif key == pygame.K_F1:

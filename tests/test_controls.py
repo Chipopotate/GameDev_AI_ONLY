@@ -159,14 +159,14 @@ def test_hud_draws_the_controls_table(game, monkeypatch):
         return original(target, value, *args, **kwargs)
 
     monkeypatch.setattr(widgets, "draw_text", record)
-    game.hud.draw(game.screen, game.sim, game.camera, 60.0, False)
+    game.hud.draw(game.screen, game.sim, game.camera, 60.0)
     parts = [line for line, _indent in game.hud._control_lines()]
     assert " ".join(parts) == " ".join(hint_lines()), "перенос не теряет слов"
     start = drawn.index(parts[0])
     assert drawn[start:start + len(parts)] == parts, "таблица нарисована целиком"
 
     drawn.clear()
-    game.hud.draw(game.screen, game.sim, game.camera, 60.0, False, window_open=True)
+    game.hud.draw(game.screen, game.sim, game.camera, 60.0, window_open=True)
     assert not set(parts) & set(drawn), "при открытом окне таблица скрыта"
 
 
@@ -371,3 +371,107 @@ def test_no_scanning_while_the_window_is_open(game, monkeypatch):
     game.advance(config.TICK * 5)
     assert sim.scan_progress > 0.0, "без окна тот же жест сканирует"
 
+
+
+# --------------------------------------------------------- подсказки HUD
+def record_text(monkeypatch) -> list[str]:
+    """Список всех строк, которые HUD и окна рисуют через `widgets.draw_text`."""
+    drawn: list[str] = []
+    original = widgets.draw_text
+
+    def record(target, value, *args, **kwargs):
+        drawn.append(value)
+        return original(target, value, *args, **kwargs)
+
+    monkeypatch.setattr(widgets, "draw_text", record)
+    return drawn
+
+
+def drone_two_tiles_from_deposit(game):
+    """Дрон в двух тайлах от неизученной залежи: скан достаёт, добыча — нет."""
+    sim = game.sim
+    deposits = sorted((d for d in sim.world.deposits
+                       if not d.depleted and sim.knowledge.unknown(d.resource_id)),
+                      key=lambda d: sim.drone.distance_to_tile(d.x, d.y))
+    for deposit in deposits:
+        for dx, dy in ((2, 0), (-2, 0), (0, 2), (0, -2)):
+            x, y = deposit.x + dx, deposit.y + dy
+            if not sim.world.is_walkable_tile(x, y) or sim.world.deposit_at(x, y):
+                continue
+            if sim.run.relic_at(x, y) is not None:
+                continue
+            sim.drone.x, sim.drone.y = x + 0.5, y + 0.5
+            game.camera.snap_to(sim.drone.x, sim.drone.y)
+            assert sim.in_scan_range(deposit) and not sim.in_mine_range(deposit)
+            return deposit
+    raise AssertionError("нет залежи со свободной землёй в двух тайлах")
+
+
+def test_prompt_says_scanning_while_the_scan_goes_from_afar(game, monkeypatch):
+    """Скан достаёт дальше добычи (🔧 `SCAN_RANGE` > `MINE_RANGE`).
+
+    Пока он идёт, подсказка — «Сканирую …», а не «слишком далеко».
+    """
+    sim = game.sim
+    sim.inventory.add(ENERGY_ITEM, config.SCAN_ENERGY_COST * 2)
+    deposit = drone_two_tiles_from_deposit(game)
+    hold(monkeypatch, screen_of(game, deposit.x, deposit.y), buttons=(0, 0, 1))
+    for _ in range(5):
+        game.poll_input()
+        game.advance(config.TICK)
+    assert sim.scan_target is deposit and sim.scan_progress > 0.0
+    name = sim.run.items[deposit.resource_id].name
+    assert game.hud._prompt_for(sim)[0] == f"Сканирую {name}"
+
+
+def test_prompt_does_not_say_mining_with_a_full_cargo(game, monkeypatch):
+    """Хранилище полно — добычи нет, и подсказка не пишет «Добываю»."""
+    sim = game.sim
+    deposit = drone_at_deposit(game)
+    filler = next(i.id for i in sim.run.items.natural
+                  if not i.rare and i.id != deposit.resource_id)
+    sim.hotbar.add(filler, config.HOTBAR_SLOTS * config.SLOT_STACK_MAX)
+    sim.inventory.add(filler, config.DRONE_SLOTS * config.SLOT_STACK_MAX)
+    assert not sim.cargo.can_accept(deposit.resource_id, config.MINE_YIELD)
+    hold(monkeypatch, screen_of(game, deposit.x, deposit.y), buttons=(1, 0, 0))
+    for _ in range(10):
+        game.poll_input()
+        game.advance(config.TICK)
+    assert sim.mine_target is None and not sim.drone.action.active
+    text, _color = game.hud._prompt_for(sim)
+    assert text is not None and not text.startswith("Добываю"), text
+
+
+def test_fit_cuts_a_long_line_with_an_ellipsis(game):
+    size = config.UI_FONT_SIZE
+    name = "Конструкционный материал"
+    width = widgets.text_width(name, size) - 20
+    cut = hud._fit(name, width, size)
+    assert cut.endswith("…") and widgets.text_width(cut, size) <= width
+    assert name.startswith(cut[:-1]), "обрезан хвост, а не середина"
+    assert hud._fit("Руда", 200, size) == "Руда", "короткая строка не меняется"
+
+
+def test_inventory_summary_cuts_long_item_names(game, monkeypatch):
+    """Длинное имя в сводке инвентаря обрезается «…» и не наезжает на число."""
+    sim = game.sim
+    sim.inventory.add("structure", 30)
+    name = sim.run.items["structure"].name
+    drawn = record_text(monkeypatch)
+    game.hud.draw(game.screen, sim, game.camera, 60.0)
+    assert name not in drawn, "полное имя не влезает рядом с числом"
+    cut = [value for value in drawn if value.endswith("…") and name.startswith(value[:-1])]
+    assert cut, f"имени «{name}» в сводке нет"
+    assert "30" in drawn
+
+
+def test_controls_table_is_rendered_once(game, monkeypatch):
+    """Таблица клавиш статична: её строки рендерятся в кэш один раз, не каждый кадр."""
+    drawn = record_text(monkeypatch)
+    game.hud.draw(game.screen, game.sim, game.camera, 60.0)
+    parts = {line for line, _indent in game.hud._control_lines()}
+    assert parts <= set(drawn), "в первом кадре таблица нарисована"
+    drawn.clear()
+    for _ in range(3):
+        game.hud.draw(game.screen, game.sim, game.camera, 60.0)
+    assert not parts & set(drawn), "строки таблицы рендерятся заново каждый кадр"

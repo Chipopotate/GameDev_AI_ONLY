@@ -397,7 +397,8 @@ class Simulation:
             target = self.light.lamp_at(*tile)
         if target is None or not self.in_build_range(target.x, target.y):
             return None
-        if isinstance(target, Building) and not building_def(target.kind).dismantlable:
+        kind = target.kind if isinstance(target, Building) else BUILD_LAMP
+        if not building_def(kind).dismantlable:
             return None
         return target
 
@@ -435,6 +436,10 @@ class Simulation:
             return False
         lamp = self.light.lamp_at(x, y)
         if lamp is not None:
+            # Флаг из данных действует и на лампу: она такое же здание (plan/03).
+            if not building_def(BUILD_LAMP).dismantlable:
+                self.toast(f"{building_def(BUILD_LAMP).name} снять нельзя")
+                return False
             self.light.remove_lamp(lamp)
             self.drops.spawn_tile(BUILD_LAMP, 1, x, y)
             self.toast(f"Разобрано: {building_def(BUILD_LAMP).name}")

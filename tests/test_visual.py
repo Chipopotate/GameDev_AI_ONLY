@@ -23,18 +23,21 @@ import pygame
 import pytest
 
 from src.game import config
-from src.game.data.buildings import GENERATOR, LAMP, building as building_def
+from src.game.data.buildings import (CONVEYOR, GENERATOR, LAMP,
+                                     building as building_def)
 from src.game.data.resources import Prop
 from src.game.render import quality, theme
 from src.game.render.camera import Camera
 from src.game.render.renderer import Renderer
 from src.game.render.sprites import SpriteCache, organic
+from src.game.render.sprites.factory import SpriteFactory
 from src.game.render.sprites.gems import (HUE_MIN_DISTANCE, SILHOUETTE_MAX_IOU,
                                           hue_distance, mask_iou)
 from src.game.sim.buildings import DIRECTIONS
+from src.game.sim.commands import SelectHotbar
 from src.game.sim.run_gen import generate_run
 from src.game.sim.simulation import Simulation
-from tests.conftest import SEED, STOCK_COUNT, place, stock
+from tests.conftest import SEED, STOCK_COUNT, place, slot_of, stock
 
 #: Размер спрайта в проверках различимости: вдвое крупнее игрового тайла.
 #: Мелкий значок размывает силуэт, и различие «на глаз» пропадает раньше, чем
@@ -240,6 +243,8 @@ def _surfaces_made(renderer: Renderer) -> dict[str, int]:
         "значки": (len(renderer.icons._items) + len(renderer.icons._scaled)
                    + len(renderer.icons._props) + len(renderer.icons._marks)),
         "пятна света": len(renderer._glow_cache),
+        "призрак": (len(renderer.ghost._ghosts) + len(renderer.ghost._rings)
+                    + len(renderer.ghost._frames)),
     }
 
 
@@ -281,6 +286,61 @@ def test_warm_frame_creates_no_new_surfaces(display):
     grew = {name: (before[name], after[name]) for name in after if after[name] != before[name]}
     assert not grew, f"кадр создаёт поверхности каждый раз: {grew}"
     assert all(lamp.on for lamp in lamps), "лампы погасли — сцена развалилась, а не кэш"
+
+
+@pytest.mark.parametrize("kind", [LAMP, CONVEYOR])
+def test_warm_frame_with_a_ghost_creates_no_new_surfaces(display, kind):
+    """Призрак кэшируется по (вид, поворот, цвет, размер): кадр с ним — без `Surface`.
+
+    Курсор ходит между зелёным тайлом рядом с дроном и красным за 🔧
+    `BUILD_RANGE`: оба цвета, рамка, заливка, шевроны конвейера и кольцо
+    дальности после прогрева берутся из кэша.
+    """
+    sim = stock(Simulation(SEED))
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, kind)))
+    camera = Camera(*sim.world.spawn_point(), viewport_w=config.WINDOW_W,
+                    viewport_h=config.WINDOW_H)
+    renderer = Renderer(sim.world)
+    dx, dy = int(sim.drone.x), int(sim.drone.y)
+    near = (dx + 1, dy)
+    far = (dx + int(config.BUILD_RANGE) + 3, dy)
+    assert sim.can_place(kind, *near) and not sim.can_place(kind, *far)
+    tiles = (near, far)
+
+    for i in range(WARMUP_FRAMES):
+        renderer.draw_world(display, sim, camera, dt=config.TICK,
+                            ghost_tile=tiles[i % 2])
+    before = _surfaces_made(renderer)
+    drawn = renderer.ghost.drawn
+    for i in range(10):
+        renderer.draw_world(display, sim, camera, dt=config.TICK,
+                            ghost_tile=tiles[i % 2])
+    assert renderer.ghost.drawn - drawn == 10, "призрак рисовался в каждом кадре"
+    after = _surfaces_made(renderer)
+    grew = {name: (before[name], after[name]) for name in after if after[name] != before[name]}
+    assert not grew, f"кадр с призраком создаёт поверхности: {grew}"
+
+
+# ------------------------------------------------------------------ ореолы
+def test_halo_is_as_bright_as_its_colour(display):
+    """Ореол — это свет: в центре он `peak` × цвет, а не чёрное пятно.
+
+    Цвет уже 0..255, а `peak` — доля 0..1: лишнее деление на 255 делало все
+    ореолы фабрики чёрными, и при аддитивном блите неона построек, ламп,
+    огня двигателей и искр просто не было видно.
+    """
+    factory = SpriteFactory()
+    color = (200, 120, 60)
+    radius = 12
+    center = (radius, radius)
+    full = factory.halo(radius, color, peak=1.0).get_at(center)[:3]
+    assert all(c > p * 1.0 * 0.5 for c, p in zip(full, color)), f"ореол тёмный: {full}"
+    half = factory.halo(radius, color, peak=0.5).get_at(center)[:3]
+    assert all(abs(c - p * 0.5) <= 1 for c, p in zip(half, color)), half
+    edge = factory.halo(radius, color, peak=1.0).get_at((0, radius))[:3]
+    assert sum(edge) < sum(full), "к краю ореол гаснет"
+    hot = factory.halo(radius, color, peak=1.5).get_at(center)[:3]
+    assert hot == (255, 180, 90), f"яркость насыщается, а не переполняет байт: {hot}"
 
 
 # --------------------------------------------------------- производительность

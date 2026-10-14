@@ -487,6 +487,30 @@ def test_close_returns_the_held_stack_to_the_open_lab(window):
     assert samples(lab).count(item) == 1, "вернулся в слот, а не пропал"
 
 
+def test_held_stack_does_not_vanish_with_a_dismantled_building(window):
+    """Здание снесли при открытом окне: предмет из руки не уходит в его слоты.
+
+    Снесённое здание исчезло с карты вместе с контейнерами, и стак, «вернувшийся»
+    туда, пропал бы — закон сохранения (plan/03). Он идёт дрону.
+    """
+    w, sim, _screen = window
+    lab = put_lab(sim)
+    item = item_of(sim)
+    samples(lab).add(item, 3)
+    w.open_container(sim, lab)
+    w.click(slot_pos(w, sim, 0, 0), 1, sim)     # образцы — в руку
+    assert w.held is not None and w.held.item_id == item and w.held.count == 3
+    assert sim.dismantle_building(lab.x, lab.y)
+    assert lab not in sim.buildings.buildings
+
+    w.close(sim)
+    assert w.held is None
+    assert samples(lab).count(item) == 0, "в снесённое здание ничего не вернулось"
+    assert sim.cargo.count(item) + sim.drops.total().get(item, 0) == 3, \
+        "стак из руки не пропал"
+    assert sim.cargo.count(item) == 3, "место у дрона есть — стак у него"
+
+
 def test_opening_the_other_window_returns_the_held_stack(window):
     w, sim, _screen = window
     lab = put_lab(sim)
@@ -496,3 +520,50 @@ def test_opening_the_other_window_returns_the_held_stack(window):
     w.open_container(sim, lab)
     assert w.mode == MODE_CONTAINER and w.held is None
     assert sim.inventory.count(item_of(sim)) == 2
+
+
+# ----------------------------------------- закон сохранения при двойном клике
+def test_double_click_gathers_no_more_than_a_stack(window):
+    """Рука, как и слот, вмещает не больше лимита стека — остальное ждёт в слотах."""
+    w, sim, _screen = window
+    sim.hotbar.add(LAMP, config.BUILDING_STACK)
+    sim.inventory.add(LAMP, config.BUILDING_STACK)
+    w.open_drone(sim)
+    pos = slot_pos(w, sim, 1, 0)                 # хотбар, слот с лампами
+    w.click(pos, 1, sim, when=1000)
+    w.click(pos, 1, sim, when=1000 + DOUBLE_CLICK_MS)
+    assert w.held.item_id == LAMP and w.held.count == config.BUILDING_STACK
+    assert sim.cargo.count(LAMP) == config.BUILDING_STACK, "второй стак остался"
+
+
+def test_swapping_a_gathered_stack_loses_nothing(window):
+    """Сценарий из ревью: двойной клик по лампам, затем обмен на слот с рудой.
+
+    Раньше рука собирала 32 лампы, обмен клал в слот только 16, а остальные
+    16 пропадали. Сумма предметов до и после обязана совпасть.
+    """
+    w, sim, _screen = window
+    ore = item_of(sim)
+    sim.hotbar.add(LAMP, config.BUILDING_STACK)
+    sim.inventory.add(LAMP, config.BUILDING_STACK)
+    sim.inventory.add(ore, 3)
+    total = sim.cargo.total_count()
+    w.open_drone(sim)
+    lamps = slot_pos(w, sim, 1, 0)
+    w.click(lamps, 1, sim, when=1000)
+    w.click(lamps, 1, sim, when=1000 + DOUBLE_CLICK_MS)
+    w.click(slot_pos(w, sim, 0, slot_of(sim.inventory, ore)), 1, sim, when=5000)
+    w.close(sim)
+    on_ground = sum(sim.drops.total().values())
+    assert sim.cargo.total_count() + on_ground == total
+
+
+def test_oversized_stack_is_not_swapped_into_a_slot(window):
+    """Если в руке больше лимита слота, обмена нет: рука остаётся как была."""
+    _w, sim, _screen = window
+    ore = item_of(sim)
+    sim.inventory.slots[0] = Stack(ore, 3)
+    held = Stack(LAMP, config.BUILDING_STACK + 5)
+    rest = sim.inventory.put_slot(0, held)
+    assert rest is held and rest.count == config.BUILDING_STACK + 5
+    assert sim.inventory.slot(0).item_id == ore and sim.inventory.slot(0).count == 3

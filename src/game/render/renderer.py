@@ -85,10 +85,21 @@ GLOW_LEVELS = 4
 BREATH_STEPS = 5
 LAMP_BREATH_HZ = 3.1       # как часто «дышит» лампа
 CORE_BREATH_HZ = 4.0       # и ядро генератора
+#: Ореолы ламп, ядра генератора и сопел дрона: (яркость, размах «дыхания»),
+#: доли цвета в центре ореола (`SpriteFactory.halo`). Подобраны, когда ореолы
+#: стали видны (до M4.6 они были чёрными): прежние 0.35…0.55 у лампы и
+#: 0.45…0.70 у генератора заливали корпус бежевым и съедали решётку и контур.
+LAMP_HALO = (0.2, 0.2)
+CORE_HALO = (0.2, 0.2)
+ENGINE_HALO = (0.15, 0.3)
+#: Радиус ореола сопла, доля корпуса дрона: с 0.34 сопла были двумя бледными
+#: «облаками» за дроном шире самих сопел.
+ENGINE_HALO_SIZE = 0.24
 #: Доля яркости emissive: здание лишь «подсвечено» своим неоном, лампа — свет.
-#: Прежние 0.42/0.45 заливали полосу базы сплошным бежевым пятном.
+#: Прежние 0.42/0.45 заливали полосу базы сплошным бежевым пятном; у лампы
+#: 0.34 вместе с её ореолом высветляло корпус до серого.
 EMISSIVE_BUILDING = 0.24
-EMISSIVE_LAMP = 0.34
+EMISSIVE_LAMP = 0.26
 #: Радиус свечения в тайлах: у здания — вокруг корпуса, у лампы — шире.
 BUILDING_BLOOM_TILES = 0.75
 LAMP_BLOOM_TILES = 1.0
@@ -486,7 +497,7 @@ class Renderer:
         if burning and quality.glow_enabled():
             glow = self.sprites.factory.halo(
                 max(6, int(size * 0.55)), theme.NEON_AMBER, 0.0,
-                _quantize(0.45 + 0.25 * beat, BREATH_STEPS))
+                _quantize(CORE_HALO[0] + CORE_HALO[1] * beat, BREATH_STEPS))
             self.sprites.factory.blit_add(target, glow, (sx, sy))
 
     def _draw_wire(self, target: pygame.Surface, camera: Camera, sim: Simulation,
@@ -548,7 +559,7 @@ class Renderer:
                 beat = _breath(self.anim_time * LAMP_BREATH_HZ, _phase(lamp.id))
                 glow = self.sprites.factory.halo(
                     max(8, int(size * 0.85)), theme.NEON_AMBER, 0.0,
-                    _quantize(0.35 + 0.20 * beat, BREATH_STEPS))
+                    _quantize(LAMP_HALO[0] + LAMP_HALO[1] * beat, BREATH_STEPS))
                 self.sprites.factory.blit_add(target, glow, (sx, sy))
 
     # -------------------------------------------------- брошенные предметы
@@ -842,8 +853,9 @@ class Renderer:
         # Сопла светятся неровно: тяга «дышит» по той же лестнице яркостей,
         # поэтому ореолов в кэше конечное число.
         thrust = _quantize(0.5 + 0.5 * math.sin(self.anim_time * 7.0), BREATH_STEPS)
-        engine = self.sprites.factory.halo(max(6, int(size * 0.34)),
-                                           theme.NEON_ICE, 0.0, 0.25 + 0.45 * thrust)
+        engine = self.sprites.factory.halo(max(6, int(size * ENGINE_HALO_SIZE)),
+                                           theme.NEON_ICE, 0.0,
+                                           ENGINE_HALO[0] + ENGINE_HALO[1] * thrust)
         cos_a, sin_a = math.cos(drone.facing), math.sin(drone.facing)
         for side in (-1.0, 1.0):
             ex = sx - cos_a * size * 0.20 - sin_a * size * 0.22 * side

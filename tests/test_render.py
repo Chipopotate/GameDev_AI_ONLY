@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pygame
 import pytest
 
 from src.game import config
-from src.game.data.buildings import LAB, WIRE
-from src.game.render import quality
+from src.game.data.buildings import CONVEYOR, LAB, LAMP, STORAGE, WIRE
+from src.game.data.terrain import Terrain
+from src.game.render import effects, quality, theme
 from src.game.render.camera import Camera
+from src.game.render.effects import RING, SHARD, SPARK, EffectsDirector, ParticlePool
+from src.game.render.ghost import GHOST_SIZE
 from src.game.render.icons import IconCache
 from src.game.render.renderer import NO_POWER_OFFSET, NO_POWER_SIZE, Renderer
 from src.game.render.shapes import SHAPES, draw_shape
+from src.game.sim.commands import SelectHotbar
+from src.game.sim.resources import Stack, transfer
+from src.game.sim.run_gen import generate_run
 from src.game.sim.simulation import Simulation
-from tests.conftest import SEED, flat_world, power_lamp, stock
+from src.game.sim.world import Deposit
+from tests.conftest import (SEED, flat_world, make_world, place, power_lamp,
+                            slot_of, stock)
 
 
 @pytest.fixture
@@ -432,3 +441,229 @@ def test_deposits_drawn_counter(display):
     renderer = Renderer(sim.world)
     renderer.draw_world(display, sim, camera)
     assert 0 < renderer.deposits_drawn <= len(sim.world.deposits)
+
+
+# ------------------------------------------------------- призрак постройки
+class BlitLog(pygame.Surface):
+    """Холст, который помнит, что на него блитили и в каком порядке.
+
+    Порядок слоёв призрака по пикселям не проверить надёжно (силуэт и рамка
+    полупрозрачны и одного цвета), а по списку блитов — однозначно.
+    """
+
+    def __init__(self, size: tuple[int, int]) -> None:
+        super().__init__(size, pygame.SRCALPHA)
+        self.sources: list[pygame.Surface] = []
+
+    def blit(self, source, dest, area=None, special_flags=0):
+        self.sources.append(source)
+        return super().blit(source, dest, area, special_flags)
+
+
+def ghost_scene(kind: str) -> tuple[Simulation, Camera, Renderer, tuple[int, int]]:
+    """Запас построек, в выбранном слоте — `kind`, тайл под призраком рядом с дроном."""
+    sim = stock(Simulation(SEED))
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, kind)))
+    assert sim.selected_building() == kind
+    camera, renderer = make_frame(sim)
+    tile = (int(sim.drone.x) + 1, int(sim.drone.y))
+    assert sim.can_place(kind, *tile), "у точки старта должна быть земля"
+    return sim, camera, renderer, tile
+
+
+def outer_radius(ring: pygame.Surface) -> float:
+    """Внешний радиус нарисованного кольца: самый дальний непрозрачный пиксель."""
+    alpha = pygame.surfarray.array_alpha(ring).T
+    ys, xs = np.nonzero(alpha)
+    w, h = ring.get_size()
+    return float(np.hypot(xs - w // 2, ys - h // 2).max())
+
+
+@pytest.mark.parametrize("kind", [LAMP, CONVEYOR])
+def test_ghost_outline_is_drawn_over_the_silhouette(display, kind):
+    """plan/09: заливка зоны — под силуэтом, тонкая рамка — поверх него.
+
+    Рамка под силуэтом пряталась за тёмным спрайтом (склад, лампа), и по ней
+    было не понять, какой тайл займёт здание и встанет ли оно.
+    """
+    sim, camera, renderer, tile = ghost_scene(kind)
+    ghost = renderer.ghost
+    target = BlitLog((config.WINDOW_W, config.WINDOW_H))
+    ghost.draw(target, sim, camera, tile)
+    assert ghost.drawn == 1
+
+    ok = sim.can_place(kind, *tile)
+    size = max(8, int(config.TILE * camera.zoom * GHOST_SIZE))
+    sprite = ghost.ghost_sprite(kind, ok, sim.rotation_index(*tile), size,
+                                sim.ghost_direction(*tile))
+    order = [id(source) for source in target.sources]
+    fill = ghost.frame(size, ok, outline=False)
+    outline = ghost.frame(size, ok)
+    assert order.index(id(fill)) < order.index(id(sprite)), "заливка — под силуэтом"
+    assert order.index(id(sprite)) < order.index(id(outline)), "рамка — поверх силуэта"
+
+
+def test_build_range_ring_has_the_exact_radius(display):
+    """Кольцо 🔧 `BUILD_RANGE` — ровно по границе досягаемости, а не «с запасом».
+
+    Радиус округлялся вверх до 8 px: на границе кольцо обещало больше, чем
+    давала `sim.can_place`, и красный призрак внутри кольца выглядел поломкой.
+    """
+    sim, camera, renderer, tile = ghost_scene(LAMP)
+    ghost = renderer.ghost
+    for radius in (97, 101, 150):
+        ring = ghost.range_ring(radius)
+        assert abs(outer_radius(ring) - radius) <= 1.0, f"кольцо {radius} px"
+        assert ghost.range_ring(radius) is ring, "кольцо кэшируется"
+    assert ghost.range_ring(97) is not ghost.range_ring(101)
+
+    # В кадре — тот же радиус, что у правила дальности, и на нецелом зуме.
+    camera.set_zoom(1.1)
+    radius = config.BUILD_RANGE * camera.scale
+    assert radius % 8, "зум выбран так, чтобы радиус не был кратен старой ступени"
+    target = BlitLog((config.WINDOW_W, config.WINDOW_H))
+    ghost.draw(target, sim, camera, tile)
+    ring = max(target.sources, key=lambda source: source.get_width())
+    assert abs(outer_radius(ring) - radius) <= 1.0
+
+
+def test_no_ghost_for_an_empty_or_a_resource_slot(display):
+    """Пустой слот или ресурс в слоте — призрака нет (plan/10); постройка — есть."""
+    sim = Simulation(SEED)
+    camera, renderer = make_frame(sim)
+    tile = (int(sim.drone.x) + 1, int(sim.drone.y))
+    assert sim.selected_stack() is None
+    renderer.draw_world(display, sim, camera, ghost_tile=tile)
+    assert renderer.ghost.drawn == 0, "слот пуст"
+
+    sim.hotbar.put_slot(sim.selected_slot, Stack(sim.run.items.natural[0].id, 3))
+    assert sim.selected_building() is None
+    renderer.draw_world(display, sim, camera, ghost_tile=tile)
+    assert renderer.ghost.drawn == 0, "ресурс — не постройка"
+
+    sim.hotbar.put_slot(sim.selected_slot, Stack(LAMP, 1))
+    renderer.draw_world(display, sim, camera, ghost_tile=tile)
+    assert renderer.ghost.drawn == 1
+    renderer.draw_world(display, sim, camera, ghost_tile=None)
+    assert renderer.ghost.drawn == 1, "курсор над интерфейсом — призрака нет"
+
+
+# ------------------------------------------- эффекты: разбор и разрушение
+#: Ресурс залежи в плоской сцене: мир `make_world` — сид 0, забег тот же.
+ORE0 = generate_run(0).items.natural[0].id
+#: Тайл здания в сцене эффектов: в 🔧 `BUILD_RANGE`, но дальше подбора,
+#: чтобы упавший предмет не давал своих «светлячков».
+EFFECT_TILE = (11, 8)
+
+
+def effects_scene(deposits: list | None = None) -> tuple[Simulation, EffectsDirector]:
+    """Плоский мир, дрон в центре тайла (8, 8), наблюдатель эффектов со своим пулом.
+
+    Рендер не нужен: эффекты — это частицы в пуле и тряска, а их и проверяем.
+    """
+    rows = [[int(Terrain.GROUND)] * 16 for _ in range(16)]
+    sim = stock(Simulation(0, make_world(rows, deposits)))
+    sim.drone.x, sim.drone.y = 8.5, 8.5
+    return sim, EffectsDirector(ParticlePool(), seed=0)
+
+
+def step(sim: Simulation, director: EffectsDirector, seconds: float) -> None:
+    """Шаги симуляции, и после каждого — кадр эффектов (как в игре на 60 FPS)."""
+    for _ in range(int(round(seconds / config.TICK))):
+        sim.update(config.TICK)
+        director.update(sim, config.TICK)
+
+
+def active(director: EffectsDirector, kind: str) -> list:
+    return [p for p in director.pool.particles if p.active and p.kind == kind]
+
+
+def test_dismantling_is_a_light_flash_without_shards_or_shake():
+    """Разбор игроком — спокойная работа: вспышка и дымок, без осколков и тряски.
+
+    plan/09 §10 различает «стройку/снос» и «разрушение»: разобранный склад
+    разлетался осколками и тряс экран, как будто его взорвали враги.
+    """
+    sim, director = effects_scene()
+    assert place(sim, STORAGE, *EFFECT_TILE) is not None
+    step(sim, director, 2.0)                    # вспышка постройки погасла
+    assert not any(p.active for p in director.pool.particles)
+    assert director.shake == 0.0
+
+    sim.set_cursor_tile(*EFFECT_TILE)
+    sim.set_mining(True)
+    step(sim, director, config.DISMANTLE_TIME + 3 * config.TICK)
+    assert sim.buildings.at(*EFFECT_TILE) is None, "склад разобран"
+    assert active(director, SHARD) == [], "разбор — без осколков"
+    assert director.shake == 0.0, "разбор не трясёт экран"
+    rings = active(director, RING)
+    assert rings, "разбор отмечен вспышкой"
+    assert all(tuple(p.color) == tuple(theme.DISMANTLE_RING) for p in rings)
+
+
+def test_destroyed_building_throws_small_shards_and_shakes():
+    """Разрушение (на M5 — врагами) — осколки, дым и тряска; осколки мельче тайла."""
+    sim, director = effects_scene()
+    storage = place(sim, STORAGE, *EFFECT_TILE)
+    assert storage is not None
+    step(sim, director, 2.0)
+    assert sim.demolish(storage)
+    director.update(sim, config.TICK)
+    shards = active(director, SHARD)
+    assert shards, "разрушение — осколки"
+    assert director.shake > 0.0, "и встряска экрана"
+    biggest = effects.SHARD_SIZE * max(effects.SIZE_GRADES)
+    assert all(p.size <= biggest + 1e-9 for p in shards)
+    assert biggest < 1.0, "осколок меньше тайла, а не треугольник на полэкрана"
+
+
+def test_mining_sparks_are_small_and_sparse(monkeypatch):
+    """Искры добычи — мелкие «крошки» с частотой 🔧 `MINE_SPARK_HZ`.
+
+    Крупные и частые искры превращали залежь под лучом в белый диск: у луча
+    дрона свои искры (`effects/laser.py`).
+    """
+    sim, director = effects_scene([Deposit(0, ORE0, 9, 9, 200)])
+    pool = director.pool
+    spawned: list[tuple[str, float, float, float]] = []
+    original = pool.spawn
+
+    def record(kind, x, y, vx, vy, ttl, size, color, drag=0.0, spin=0.0):
+        spawned.append((kind, x, y, size))
+        original(kind, x, y, vx, vy, ttl, size, color, drag, spin)
+
+    monkeypatch.setattr(pool, "spawn", record)
+    seconds = 3.0
+    sim.set_cursor_tile(9, 9)
+    sim.set_mining(True)
+    step(sim, director, seconds)
+    assert sim.mined_total > 0, "добыча шла"
+    sparks = [size for kind, x, y, size in spawned
+              if kind == SPARK and (x, y) == (9.5, 9.5)]
+    expected = effects.MINE_SPARK_HZ * seconds
+    assert 0.5 * expected <= len(sparks) <= 1.5 * expected, \
+        f"искр добычи {len(sparks)} за {seconds} с, ждали около {expected:.0f}"
+    assert set(sparks) == {effects.MINE_SPARK_SIZE}
+    assert effects.MINE_SPARK_SIZE < 1.0, "искра мельче тайла"
+
+
+def test_pickup_sparks_count_the_whole_cargo():
+    """«Светлячки» подбора считают всё хранилище дрона (`Cargo`), с хотбаром.
+
+    Иначе постройка, подобранная в хотбар, не светилась бы, а перекладывание
+    хотбар → инвентарь в окне выглядело бы как подбор.
+    """
+    sim, director = effects_scene()
+    director.update(sim, config.TICK)           # наблюдатель увидел запас
+    pool = director.pool
+    before = pool.spawned
+    count = sim.hotbar.count(LAMP)
+    assert sim.cargo.add(LAMP, 1) == 0
+    assert sim.hotbar.count(LAMP) == count + 1, "постройка легла в хотбар"
+    director.update(sim, config.TICK)
+    assert pool.spawned > before, "подбор в хотбар светится"
+
+    before = pool.spawned
+    assert transfer(sim.hotbar, sim.inventory, slot_of(sim.hotbar, LAMP), 1) == 1
+    director.update(sim, config.TICK)
+    assert pool.spawned == before, "перекладывание внутри дрона — не подбор"

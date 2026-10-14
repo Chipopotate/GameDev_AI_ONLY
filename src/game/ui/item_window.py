@@ -579,23 +579,28 @@ class ItemWindow:
             self.held = None
 
     def _collect_all(self, panels: list[Panel], sim: Simulation) -> None:
-        """Двойной ЛКМ: весь этот предмет из всех сеток окна — в руку.
+        """Двойной ЛКМ: этот предмет из всех сеток окна — в руку, до полного стака.
 
         Собираем именно тот предмет, что уже в руке: первый клик пары его и
         взял. Так двойной клик не «добирает» чужое и не зависит от того, в
-        какой сетке лежит остальное.
+        какой сетке лежит остальное. Рука, как и слот, вмещает не больше
+        лимита стека (как в Minecraft): иначе стак больше лимита нельзя было
+        бы ни положить, ни обменять без потерь.
         """
         if self.held is None:
             return
         item_id = self.held.item_id
+        limit = sim.inventory.max_for(item_id)
         taken = self.held.count
         for panel in panels:
             container = panel.container
             for index in range(container.size):
+                if taken >= limit:
+                    break
                 stack = container.slot(index)
                 if stack is None or stack.item_id != item_id:
                     continue
-                moved = container.take_slot(index)
+                moved = container.take_slot(index, limit - taken)
                 if moved is not None:
                     taken += moved.count
         self.held = Stack(item_id, taken)

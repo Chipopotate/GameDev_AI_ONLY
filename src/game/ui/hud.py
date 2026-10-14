@@ -83,7 +83,7 @@ class Hud:
         self._panels: list[pygame.Rect] = []
 
     def draw(self, target: pygame.Surface, sim: Simulation, camera: Camera,
-             fps: float, paused: bool = False, window_open: bool = False) -> None:
+             fps: float, window_open: bool = False) -> None:
         """Панели HUD. Пауза рисуется отдельно (`draw_pause`) — поверх окон."""
         self._panels = []
         self._draw_status(target, sim, camera, fps)

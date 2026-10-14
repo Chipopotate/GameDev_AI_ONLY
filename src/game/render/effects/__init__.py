@@ -22,7 +22,7 @@ import random
 import pygame
 
 from src.game import config
-from src.game.render import theme
+from src.game.render import quality, theme
 from src.game.render.camera import Camera
 from src.game.render.sprites import factory
 
@@ -47,8 +47,17 @@ SPARK_SCALE = 0.25
 SHARD_SIZE = 0.3
 #: Искры добычи — мелкие «крошки» в цвете ресурса: у луча дрона свои искры
 #: (`effects/laser.py`), и крупные искры здесь превращали залежь в белый диск.
-MINE_SPARK_SIZE = 0.6
+MINE_SPARK_SIZE = 0.4
 MINE_SPARK_HZ = 8.0
+#: Яркость ореола искры в центре, доля её цвета. Ореолы аддитивные, и с 1.0
+#: пять-восемь искр над залежью складывались в бело-жёлтый диск, под которым
+#: камня было не видно (заметно стало, когда ореолы перестали быть чёрными).
+SPARK_PEAK = 0.4
+#: Вспышка разбора, тайлы: кольцо растёт до ~5.5 своих размеров, и с 0.9 оно
+#: под конец обводило полэкрана вокруг тайла толстым лососевым бубликом.
+DISMANTLE_FLASH_SIZE = 0.45
+#: Толщина кольца-вспышки в долях его спрайта (0.10 — сплошной «бублик»).
+RING_STROKE = 0.07
 
 
 class Particle:
@@ -155,7 +164,12 @@ class ParticlePool:
                 step = min(SPARK_STEPS - 1, int(ratio * SPARK_STEPS))
                 radius = max(2, int(round(p.size * scale * SPARK_SCALE
                                           * (1.0 - step / SPARK_STEPS * 0.6))))
-                glow = self.factory.halo(radius, p.color, 0.0, 1.0)
+                if not quality.glow_enabled():
+                    # `low`: без свечения (plan/09 §3.7) — искра просто точка.
+                    pygame.draw.circle(target, p.color, (int(sx), int(sy)),
+                                       max(1, radius // 2))
+                    continue
+                glow = self.factory.halo(radius, p.color, 0.0, SPARK_PEAK)
                 self.factory.blit_add(target, glow, (sx, sy))
             elif p.kind == SMOKE:
                 step = min(SMOKE_STEPS - 1, int(ratio * SMOKE_STEPS))
@@ -243,7 +257,8 @@ class EffectsDirector:
                 # Разбор игроком — спокойная работа, а не катастрофа: короткая
                 # вспышка и немного дыма, без осколков и тряски (plan/09 §10:
                 # «стройка/снос» и «разрушение» — разные эффекты).
-                self.pool.spawn(RING, cx, cy, 0.0, 0.0, 0.30, 0.9, theme.DISMANTLE_RING)
+                self.pool.spawn(RING, cx, cy, 0.0, 0.0, 0.30, DISMANTLE_FLASH_SIZE,
+                                theme.DISMANTLE_RING)
                 self.pool.burst(SMOKE, cx, cy, 4, 0.9, 0.5, 0.8, (0, 0, 0), self.rng, 2.4)
                 continue
             # Разрушение (на M5 — врагами): осколки, дым и встряска экрана.
@@ -322,7 +337,7 @@ def _draw_ring_for(color):
     def draw(surf: pygame.Surface, s: float) -> None:
         c = s / 2.0
         pygame.draw.circle(surf, color, (int(c), int(c)), int(c * 0.86),
-                           max(1, int(s * 0.10)))
+                           max(1, int(s * RING_STROKE)))
     return draw
 
 

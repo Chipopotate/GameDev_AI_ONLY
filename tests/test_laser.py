@@ -428,3 +428,24 @@ def test_renderer_keeps_the_beam_on_pause(display):
     draw_frames(renderer, display, sim, camera, 10, dt=0.0)
     assert renderer.laser.time == time
     assert renderer.laser.visible and renderer.laser.dots > 0
+
+
+def test_low_quality_spawns_no_beam_sparks(scene):
+    """`low` — без свечения: у луча нет искр-ореолов в точке попадания."""
+    beam, _factory, _camera, _drone, _surface = scene
+    with quality.override(quality.LOW):
+        for _ in range(120):
+            beam.update(action(ACTION_MINE, 1.0), config.TICK)
+    assert beam.pool.active_count() == 0
+
+
+def test_low_quality_draws_pool_sparks_without_halos(scene):
+    """Искры пула на `low` — точки, а не ореолы (plan/09 §3.7: «low — без свечения»)."""
+    _beam, factory, camera, _drone, surface = scene
+    pool = ParticlePool(0, factory)
+    pool.spawn("spark", *TARGET, 0.0, 0.0, 0.5, 1.0, theme.LASER_RED)
+    made = factory.halos_made
+    with quality.override(quality.LOW):
+        pool.draw(surface, camera)
+    assert pool.drawn == 1
+    assert factory.halos_made == made, "на low ореол не строится"

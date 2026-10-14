@@ -12,10 +12,14 @@ import pytest
 
 from src.game import config
 from src.game.app import Game
-from src.game.data.buildings import CONVEYOR, LAB, LAB_SAMPLES, LAMP
+from src.game.data.buildings import CONVEYOR, DRILL, LAB, LAB_SAMPLES, LAMP, WIRE
 from src.game.data.resources import Prop
 from src.game.sim.buildings import DIRECTIONS
+from src.game.sim.commands import SelectHotbar
 from src.game.sim.resources import Stack, give
+from src.game.sim.simulation import ENERGY_ITEM
+from src.game.ui import widgets
+from src.game.ui.hud import CONTROLS_GAP, PROMPT_ABOVE_HOTBAR
 from src.game.ui.item_window import MODE_CONTAINER, MODE_DRONE
 from tests.conftest import (SEED, give_building, place, power_grid, slot_of,
                             stock)
@@ -162,6 +166,28 @@ def find_tile(game, kind: str = LAMP, near: float = 0.0, far: float = 1e9,
     raise AssertionError("рядом с дроном нет подходящего тайла")
 
 
+def drone_next_to_deposit(game):
+    """Дрон на свободной земле вплотную к залежи, камера — на нём.
+
+    Оттуда до залежи достают и добыча, и скан, и постановка бура.
+    """
+    sim = game.sim
+    deposits = sorted((d for d in sim.world.deposits if not d.depleted),
+                      key=lambda d: sim.drone.distance_to_tile(d.x, d.y))
+    for deposit in deposits:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            x, y = deposit.x + dx, deposit.y + dy
+            if not sim.world.is_walkable_tile(x, y) or sim.world.deposit_at(x, y):
+                continue
+            if sim.run.relic_at(x, y) is not None:
+                continue
+            sim.drone.x, sim.drone.y = x + 0.5, y + 0.5
+            game.camera.snap_to(sim.drone.x, sim.drone.y)
+            assert sim.in_mine_range(deposit) and sim.in_scan_range(deposit)
+            return deposit
+    raise AssertionError("на карте нет залежи со свободным тайлом рядом")
+
+
 # ------------------------------------------------- хотбар: выбор слота
 def test_digit_keys_select_hotbar_slot(game):
     """1…9 выбирают слот хотбара: «что строю» — это выбранный слот (plan/10)."""
@@ -206,6 +232,17 @@ def test_shift_wheel_scrolls_hotbar_and_plain_wheel_zooms(game, monkeypatch):
     game.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, y=1, x=0))
     assert game.camera.zoom > zoom
     assert game.sim.selected_slot == config.HOTBAR_SLOTS - 1, "зум не трогает слот"
+
+
+def test_shift_wheel_also_takes_the_horizontal_scroll(game, monkeypatch):
+    """С Shift некоторые системы (macOS, тачпады) шлют прокрутку по `x`, а не по `y`."""
+    zoom = game.camera.zoom
+    mods(monkeypatch, pygame.KMOD_LSHIFT)
+    game.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=-1, y=0))
+    assert game.sim.selected_slot in (1, config.HOTBAR_SLOTS - 1), "слот сменился"
+    game.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=1, y=0))
+    assert game.sim.selected_slot == 0, "обратная прокрутка вернула слот"
+    assert game.camera.zoom == pytest.approx(zoom), "Shift+колесо не зумит"
 
 
 # --------------------------------------------- постановка из хотбара (ПКМ)
@@ -273,6 +310,101 @@ def test_right_click_with_resource_in_slot_changes_nothing(game, monkeypatch):
     click_at(game, tx, ty, button=3)
     assert game.sim.state_signature() == before
     assert game.sim.hotbar.count(item) == 3
+
+
+def test_rmb_on_a_red_ghost_does_nothing_and_says_nothing(game, monkeypatch):
+    """Красный призрак — не команда: ни постройки, ни тоста «Здесь не построить».
+
+    Проверка та же, что у призрака (`sim.can_place`): вне радиуса, на здании
+    без контейнеров (провод) и на залежи, куда лампу не поставить, ПКМ молчит.
+    """
+    mods(monkeypatch)
+    sim = game.sim
+    deposit = drone_next_to_deposit(game)
+    wire = find_tile(game, WIRE, near=1.0)
+    assert place(sim, WIRE, *wire) is not None
+    give_building(sim, LAMP, 2)
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, LAMP)))
+    far = find_tile(game, LAMP, in_range=False)
+    tiles = (far, wire, (deposit.x, deposit.y))
+    sim.toasts.clear()
+    before = sim.state_signature()
+    for tile in tiles:
+        assert not sim.can_place(LAMP, *tile), f"призрак на {tile} должен быть красным"
+        click_at(game, *tile, button=3)
+    assert sim.state_signature() == before
+    assert sim.cargo.count(LAMP) == 2, "предмет не потрачен"
+    assert [t.text for t in sim.toasts] == [], "красный призрак не тостит"
+    assert not game.item_window.visible, "у провода контейнеров нет — окна нет"
+
+    empty = next(i for i in range(sim.hotbar.size) if sim.hotbar.slot(i) is None)
+    assert sim.apply(SelectHotbar(empty))
+    before = sim.state_signature()
+    click_at(game, *wire, button=3)
+    assert sim.state_signature() == before and not sim.toasts
+    assert not game.item_window.visible
+
+
+def test_rmb_that_placed_the_last_drill_does_not_start_a_scan(game, monkeypatch):
+    """Нажатие ПКМ, поставившее бур, до отпускания не становится удержанием.
+
+    Последний бур ушёл из слота — слот пуст, а пустой слот с ПКМ на залежи —
+    это скан. Без «потраченного» нажатия скан начинался сам, той же кнопкой.
+    """
+    mods(monkeypatch)
+    sim = game.sim
+    deposit = drone_next_to_deposit(game)
+    assert sim.knowledge.unknown(deposit.resource_id), "скану есть что открыть"
+    sim.inventory.add(ENERGY_ITEM, config.SCAN_ENERGY_COST * 3)
+    give_building(sim, DRILL, 1)
+    assert sim.apply(SelectHotbar(slot_of(sim.hotbar, DRILL)))
+    pos = screen_of(game, deposit.x, deposit.y)
+
+    hold_mouse(monkeypatch, pos, buttons=(0, 0, 1))
+    click_screen(game, pos, button=3)
+    drill = sim.buildings.at(deposit.x, deposit.y)
+    assert drill is not None and drill.kind == DRILL
+    assert sim.selected_building() is None, "последний бур потрачен — слот пуст"
+    for _ in range(ticks_in(config.SCAN_TIME * 2)):
+        game.poll_input()
+        game.advance(config.TICK)
+    assert sim.scan_active is False
+    assert sim.scan_progress == 0.0 and sim.scans_done == 0
+    assert sim.cargo.count(ENERGY_ITEM) == config.SCAN_ENERGY_COST * 3
+
+    hold_mouse(monkeypatch, pos)                # отпустил
+    game.poll_input()
+    hold_mouse(monkeypatch, pos, buttons=(0, 0, 1))
+    game.poll_input()
+    assert sim.scan_active is True, "после отпускания ПКМ снова держится в мире"
+
+
+def test_lmb_pressed_on_the_hotbar_does_not_mine_when_dragged_onto_the_map(
+        game, monkeypatch):
+    """ЛКМ выбрала слот хотбара — дотянутая до залежи, она не копает.
+
+    Новое нажатие уже в мире — обычная добыча.
+    """
+    mods(monkeypatch)
+    sim = game.sim
+    deposit = drone_next_to_deposit(game)
+    click_screen(game, game.hud.hotbar.slot_rects()[2].center)
+    assert sim.selected_slot == 2
+    pos = screen_of(game, deposit.x, deposit.y)
+    hold_mouse(monkeypatch, pos, buttons=(1, 0, 0))   # кнопку не отпускали
+    for _ in range(5):
+        game.poll_input()
+        game.advance(config.TICK)
+    assert sim.mine_active is False and sim.mine_progress == 0.0
+
+    hold_mouse(monkeypatch, pos)
+    game.poll_input()
+    click_screen(game, pos)
+    hold_mouse(monkeypatch, pos, buttons=(1, 0, 0))
+    for _ in range(5):
+        game.poll_input()
+        game.advance(config.TICK)
+    assert sim.mine_active is True and sim.mine_progress > 0.0
 
 
 def test_left_click_in_world_builds_nothing(game, monkeypatch):
@@ -416,6 +548,27 @@ def test_space_pauses_with_the_window_open(game):
     key(game, pygame.K_e)
     key(game, pygame.K_SPACE)
     assert game.paused and game.item_window.visible
+
+
+def test_pause_plate_is_drawn_over_the_open_window(game, monkeypatch):
+    """«ПАУЗА» — самый верхний слой: окно предметов и хотбар её не закрывают."""
+    drawn: list[str] = []
+    original = widgets.draw_text
+
+    def record(target, value, *args, **kwargs):
+        drawn.append(value)
+        return original(target, value, *args, **kwargs)
+
+    monkeypatch.setattr(widgets, "draw_text", record)
+    key(game, pygame.K_e)
+    key(game, pygame.K_SPACE)
+    assert game.paused and game.item_window.visible
+    game.render(config.TICK)
+    title = game.item_window.title
+    assert title in drawn and "ПАУЗА" in drawn
+    last_title = max(i for i, value in enumerate(drawn) if value == title)
+    assert drawn.index("ПАУЗА") > last_title, "пауза нарисована под окном"
+    assert drawn[-2:] == ["ПАУЗА", "Пробел — продолжить"], "после паузы ничего нет"
 
 
 def test_item_window_swallows_clicks(game, monkeypatch):
@@ -647,6 +800,45 @@ def test_ghost_tile_follows_cursor_over_the_map(game, monkeypatch):
     assert game.ghost_tile() is None
 
 
+def test_hud_panels_take_the_cursor_after_a_frame(game, monkeypatch):
+    """Над панелью HUD мир не виден: ни призрака, ни добычи, ни скана (plan/10).
+
+    Места панелей запоминает кадр, который их нарисовал, — до первого кадра
+    их нет. Строка подсказки у курсора — не панель: она мир не закрывает.
+    """
+    mods(monkeypatch)
+    sim = game.sim
+    hud = game.hud
+    give_building(sim, LAMP, 1)
+    deposit = drone_next_to_deposit(game)
+    hold_mouse(monkeypatch, screen_of(game, deposit.x, deposit.y))
+    game.poll_input()                           # курсор на залежи — есть подсказка
+    game.draw_frame(config.TICK)
+    m = config.UI_MARGIN
+    panels = {
+        "статус": (m + 5, m + 5),
+        "время": (config.WINDOW_W // 2, m + 5),
+        "сводка инвентаря": (m + 5, config.WINDOW_H - m - 5),
+        "таблица клавиш": (config.WINDOW_W - m - 5,
+                           hud.hotbar.rect.top - CONTROLS_GAP - 5),
+    }
+    for name, pos in panels.items():
+        assert hud.over_ui(pos), name
+        hold_mouse(monkeypatch, pos, buttons=(1, 0, 1))
+        assert game.ghost_tile() is None, f"призрак под панелью «{name}»"
+        game.poll_input()
+        assert sim.mine_active is False and sim.scan_active is False, name
+
+    prompt = (config.WINDOW_W // 2, hud.hotbar.rect.top - PROMPT_ABOVE_HOTBAR + 13)
+    assert hud._prompt_for(sim)[0] is not None
+    assert not hud.over_ui(prompt), "строка подсказки — не панель"
+    tile = next_to_drone(game)
+    pos = screen_of(game, tile[0], tile[1])
+    assert not hud.over_ui(pos)
+    hold_mouse(monkeypatch, pos)
+    assert game.ghost_tile() == tile, "над картой призрак есть"
+
+
 # -------------------------------------------------------------- ввод в sim
 def test_right_button_starts_scanning(game, monkeypatch):
     monkeypatch.setattr(pygame.key, "get_pressed", lambda: [False] * 512)
@@ -749,3 +941,21 @@ def test_random_seed_when_not_given():
         assert 1 <= game.seed < 2 ** 31
     finally:
         game.close()
+
+
+def test_r_over_a_hud_panel_does_nothing(game, monkeypatch):
+    """Над панелью HUD мира не видно: R не крутит конвейер, спрятанный под ней."""
+    mods(monkeypatch)
+    tx, ty = next_to_drone(game)
+    conveyor = place(game.sim, CONVEYOR, tx, ty)
+    assert conveyor is not None and game.sim.selected_building() is None
+    game.draw_frame(config.TICK)                 # кадр запоминает места панелей
+    panel = (config.UI_MARGIN + 5, config.UI_MARGIN + 5)
+    assert game.hud.over_ui(panel)
+    # Курсор над панелью, а «тайл под курсором» подменён на тайл конвейера: так
+    # видно, что R отказала именно из-за панели, а не из-за пустого тайла.
+    hold_mouse(monkeypatch, panel)
+    monkeypatch.setattr(game, "tile_at_screen", lambda pos=None: (tx, ty))
+    direction = conveyor.direction
+    key(game, pygame.K_r)
+    assert conveyor.direction == direction

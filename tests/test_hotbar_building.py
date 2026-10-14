@@ -694,6 +694,21 @@ def test_lamp_is_dismantled_the_same_way():
     assert everything(sim) == total
 
 
+@pytest.mark.parametrize("kind", [STORAGE, LAMP])
+def test_dismantle_toast_names_the_building(kind):
+    """Сообщение разбора одно на все постройки: «Разобрано: имя».
+
+    Раньше оно собиралось из имени и глагола женского рода («Склад
+    разобрана»), а лампа говорила «снята».
+    """
+    sim = scene()
+    assert place(sim, kind, *NEAR) is not None
+    sim.toasts.clear()
+    hold_lmb(sim, NEAR, DISMANTLE_HOLD)
+    assert at(sim, NEAR) is None
+    assert f"Разобрано: {building_def(kind).name}" in [t.text for t in sim.toasts]
+
+
 def world_items(sim: Simulation) -> tuple:
     """Слепок вещей и построек без часов: время в паузе между шагами идёт."""
     return (sim.buildings.state(), tuple((l.x, l.y) for l in sim.light.lamps),
@@ -829,6 +844,35 @@ def test_drone_action_scan_on_a_deposit():
     assert not sim.drone.action.active
 
 
+def test_full_cargo_sets_no_mine_target_and_no_beam():
+    """Хранилище полно: добычи нет — значит, нет и цели, луча MINE и «Добываю».
+
+    Ресурс из залежи не берётся; луч, «жгущий» залежь без толку, обманывал
+    бы игрока. Освободил место — добыча пошла как обычно.
+    """
+    sim = scene()
+    sim.hotbar.add(FILLER, config.HOTBAR_SLOTS * config.SLOT_STACK_MAX)
+    sim.inventory.add(FILLER, config.DRONE_SLOTS * config.SLOT_STACK_MAX)
+    assert not sim.cargo.can_accept(ORE, config.MINE_YIELD)
+    deposit = sim.world.deposit_at(*DEPOSIT)
+    amount = deposit.amount
+
+    sim.set_cursor_tile(*DEPOSIT)
+    sim.set_mining(True)
+    for _ in range(int(config.MINE_TIME_PER_UNIT * 2 / config.TICK)):
+        sim.update(config.TICK)
+        assert sim.mine_target is None
+        assert sim.drone.action.kind != ACTION_MINE and not sim.drone.action.active
+    assert sim.mine_progress == 0.0 and deposit.amount == amount
+    assert [t.text for t in sim.toasts].count("Инвентарь полон") == 1, \
+        "о полном хранилище — один раз"
+
+    sim.inventory.take_slot(0)                  # освободили слот
+    run(sim, config.MINE_TIME_PER_UNIT * 0.3)
+    assert sim.mine_target is deposit and sim.mine_progress > 0.0
+    assert sim.drone.action.kind == ACTION_MINE
+
+
 def test_no_action_when_the_target_is_out_of_reach():
     """Луч только при цели в радиусе: далёкая залежь — ни добычи, ни скана."""
     sim = scan_ready(None)
@@ -888,6 +932,29 @@ def test_r_with_a_lamp_and_no_conveyor_does_nothing():
     assert sim.build_rotation is None
     assert sim.ghost_direction(*GROUND) is None, "у лампы нет направления"
     assert sim.state_signature() == before
+
+
+def test_r_with_a_lamp_in_the_slot_leaves_the_standing_conveyor_alone():
+    """Постройка без направления в слоте (лампа): R не делает ничего.
+
+    Стоящий конвейер крутится, только «если призрака нет» (plan/10): с лампой в
+    руке призрак есть, и у R не должно быть двух смыслов сразу.
+    """
+    sim = scene()
+    conveyor = place(sim, CONVEYOR, *EAST, direction=E)
+    assert conveyor is not None
+    give_building(sim, LAMP, 1)
+    select(sim, LAMP)
+    before = sim.state_signature()
+    assert not sim.rotate_preview(*EAST)
+    assert conveyor.direction == E, "с лампой в слоте конвейер не крутится"
+    assert sim.build_rotation is None
+    assert sim.state_signature() == before
+
+    empty = next(i for i in range(sim.hotbar.size) if sim.hotbar.slot(i) is None)
+    assert sim.apply(SelectHotbar(empty))       # призрака нет — R крутит ленту
+    assert sim.rotate_preview(*EAST)
+    assert conveyor.direction == S
 
 
 # ------------------------------------------------------- выбор слота
@@ -973,3 +1040,17 @@ def test_start_buildings_are_craftable_on_1000_seeds():
         for item_id in run_plan.items.common_ids:
             assert stock.add(item_id, per_resource) == 0
         assert_first_night_craftable(stock, run_plan, f"seed {seed}")
+
+
+def test_undismantlable_lamp_stays(monkeypatch):
+    """Флаг `dismantlable` из данных действует и на лампу: она такое же здание."""
+    monkeypatch.setitem(BUILDING_TYPES, LAMP,
+                        replace(BUILDING_TYPES[LAMP], dismantlable=False))
+    sim = scene()
+    assert place(sim, LAMP, *GROUND) is not None
+    run(sim, config.TICK)
+    hold_lmb(sim, GROUND, DISMANTLE_HOLD)
+    assert sim.light.lamp_at(*GROUND) is not None
+    assert sim.dismantle_progress == 0.0
+    assert not sim.apply(DismantleBuilding(GROUND))
+    assert sim.light.lamp_at(*GROUND) is not None

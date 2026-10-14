@@ -17,7 +17,7 @@ import sys
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Свет — 2D рогалик + автоматизация + защита базы (прототип M3)",
+        description="Свет — 2D рогалик + автоматизация + защита базы (прототип)",
     )
     parser.add_argument("--seed", type=int, default=None,
                         help="сид генерации карты (по умолчанию случайный)")

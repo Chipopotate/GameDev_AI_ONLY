@@ -89,7 +89,7 @@ RING_WIDTH = 0.06
 #: Мелкие: пятно и так яркое, крупные искры сливались бы с ним в один блин.
 SPARK_SPEED = (0.8, 2.2)
 SPARK_TTL = (0.18, 0.40)
-SPARK_SIZE = 0.5
+SPARK_SIZE = 0.3
 #: Ширина «простой линии» на `low`, пиксели.
 LOW_WIDTH = 2
 
@@ -148,6 +148,8 @@ class LaserBeam:
         """Искры в точке попадания: чем дальше работа, тем их больше."""
         if self.pool is None or self.target is None:
             return
+        if not quality.glow_enabled():
+            return                     # `low`: без свечения — и без искр луча
         rate = config.LASER_SPARK_HZ * self.intensity * (0.5 + 0.5 * self.progress)
         self._spark_debt += rate * dt
         tx, ty = self.target

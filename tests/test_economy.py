@@ -687,6 +687,49 @@ def test_cycle_recipe_walks_through_known_recipes():
     assert sim.cycle_recipe(assembler) == "structure", "перебор идёт по кругу"
 
 
+def test_cycle_recipe_offers_amplifier_recipes_too():
+    """Усилитель («energy+») — рецепт той же роли: сборщик обязан его перебирать.
+
+    Фильтр шёл по id рецепта, а у усилителя id с «+», и рецепт, открытый
+    реликвией-усилителем, в сборщике было не выбрать. Рецепты построек
+    (лампа и лаборатория известны с начала) в перебор по-прежнему не входят.
+    """
+    sim = stock(Simulation(SEED))
+    ax, ay = int(sim.drone.x) + 1, int(sim.drone.y)
+    assembler = sim.build(ASSEMBLER, ax, ay)
+    assert assembler is not None
+    assert sim.knowledge.is_known(LAMP) and sim.knowledge.is_known(LAB)
+
+    sim.knowledge.learn("energy+")
+    assert sim.cycle_recipe(assembler) == "energy+", "открыт только усилитель"
+    sim.knowledge.learn("structure")
+    seen = {sim.cycle_recipe(assembler) for _ in range(4)}
+    assert seen == {"energy+", "structure"}, "по кругу — только рецепты ролей"
+
+
+def test_assembler_crafts_by_an_amplifier_recipe():
+    """Выбранный усилитель работает: 🔧 4 горючего → 2 энергии за его время."""
+    sim = stock(Simulation(SEED))
+    ax, ay = int(sim.drone.x) + 1, int(sim.drone.y)
+    assembler = sim.build(ASSEMBLER, ax, ay)
+    assert assembler is not None
+    recipe = recipe_def("energy+")
+    sim.knowledge.learn(recipe.id)
+    assert sim.cycle_recipe(assembler) == recipe.id
+    material = sim.run.items.with_prop(recipe.props[0])[0]
+    source = assembler.container(building_def(ASSEMBLER).input_id)
+    source.add(material.id, recipe.requires[0][1])
+    output = assembler.container(building_def(ASSEMBLER).output_id)
+    before = output.count(recipe.role)
+
+    power_grid(sim, ax, ay)
+    for _ in range(seconds(recipe.craft_time * 2)):
+        sim.update(config.TICK)
+    assert assembler.made >= 1, "по усилителю сборщик ничего не собрал"
+    assert output.count(recipe.role) - before == recipe.outputs
+    assert source.count(material.id) == 0, "материалы потрачены"
+
+
 # --------------------------------------------- энергия в руках и в рецептах
 def test_scan_costs_energy_items():
     """С M4 скан тратит энергию (флаг M3 «скан бесплатный» снят)."""
@@ -732,3 +775,32 @@ def test_generator_fuel_accepts_raw_flame_and_crafted_energy():
     assert _is_fuel(ENERGY_ITEM, definition.fuel, sim.run.items)
     cold = next(i for i in sim.run.items.natural if not i.has(Prop.FLAMMABLE))
     assert not _is_fuel(cold.id, definition.fuel, sim.run.items)
+
+
+# ------------------------------------------------- запас для тестов (conftest)
+def test_stock_tops_up_to_the_norm_and_is_safe_to_repeat():
+    """`stock` доливает запас до нормы, а не насыпает ещё по стаку.
+
+    Хелперы зовут друг друга (`power_lamp` → `power_grid` → `stock`), и
+    повторный вызов не должен переполнять хранилище дрона: иначе тест падал
+    бы на «не влез предмет постройки», а не на том, что он проверяет.
+    """
+    sim = stock(Simulation(SEED))
+    norm = sorted(sim.cargo.items())
+    stock(sim)
+    assert sorted(sim.cargo.items()) == norm, "повторный вызов ничего не добавил"
+
+    role = ROLES[0].id
+    assert sim.cargo.remove(role, 5)
+    x, y = free_tile(sim, LAMP, int(sim.drone.x), int(sim.drone.y))
+    assert sim.build(LAMP, x, y) is not None
+    stock(sim)
+    assert sim.cargo.count(role) == STOCK_COUNT, "роль долита до нормы"
+    assert sim.cargo.count(LAMP) == config.BUILDING_STACK, "постройка долита до стака"
+
+    generator = power_grid(sim, x, y)            # внутри — ещё один `stock`
+    assert generator is not None
+    assert sim.cargo.count(GENERATOR) == config.BUILDING_STACK - 1
+    expected = [(item, config.BUILDING_STACK - 1 if item == GENERATOR else count)
+                for item, count in norm]
+    assert sorted(sim.cargo.items()) == expected

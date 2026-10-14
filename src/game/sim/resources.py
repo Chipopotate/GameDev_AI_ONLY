@@ -240,8 +240,12 @@ class Container:
             slot.count += moved
             rest = stack.count - moved
             return Stack(stack.item_id, rest) if rest > 0 else None
-        # Разные предметы: обмен, как в Minecraft.
-        self.slots[index] = Stack(stack.item_id, min(limit, stack.count))
+        # Разные предметы: обмен, как в Minecraft. Если в руке больше, чем
+        # влезает в слот, обмена нет: иначе излишек пропал бы (закон
+        # сохранения, plan/03) — рука остаётся как есть.
+        if stack.count > limit:
+            return stack
+        self.slots[index] = Stack(stack.item_id, stack.count)
         return slot
 
     def move_slot(self, src: int, dst: int) -> bool:

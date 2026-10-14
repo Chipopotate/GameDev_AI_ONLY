@@ -73,6 +73,7 @@ class Game:
         #: залежи под ним, а ЛКМ, выбравшая слот, — копать (plan/10).
         self._consumed = [False, False, False]
 
+        self._defeat_shown = False
         self.running = True
         self.paused = False
         self.fps = 0.0
@@ -138,6 +139,10 @@ class Game:
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
+        elif self.sim.defeated:
+            # Экран поражения: игра стоит, Esc — выход.
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self.running = False
         elif event.type == pygame.TEXTINPUT:
             if self.ui.text_input_active:
                 self.item_window.craft.search.insert(event.text)
@@ -296,6 +301,8 @@ class Game:
         return steps
 
     def update_camera(self, dt: float) -> None:
+        if self.sim.defeated:
+            return                      # камера стоит на точке прорыва
         drone = self.sim.drone
         self.camera.follow(drone.x, drone.y, dt)
         self.camera.clamp_to(self.sim.world.width, self.sim.world.height)
@@ -306,9 +313,16 @@ class Game:
         # На паузе анимации стоят: картинка замирает вместе с симуляцией
         # (лента, луч дрона, частицы), а не продолжает жить своей жизнью.
         anim_dt = 0.0 if self.paused else dt
+        if self.sim.defeated and self.sim.breach_point is not None \
+                and not self._defeat_shown:
+            # Экран поражения показывает точку прорыва (M5): камера — туда.
+            self._defeat_shown = True
+            bx, by = self.sim.breach_point
+            self.camera.snap_to(bx + 0.5, by + 0.5)
         self.renderer.draw_world(self.screen, self.sim, self.camera,
                                  show_lit_layer=self.debug.show_layers, dt=anim_dt,
-                                 ghost_tile=self.ghost_tile())
+                                 ghost_tile=None if self.sim.defeated else self.ghost_tile(),
+                                 show_flow=self.debug.show_path)
         self.hud.draw(self.screen, self.sim, self.camera, self.fps,
                       window_open=self.item_window.visible)
         self.item_window.draw(self.screen, self.sim)
@@ -317,6 +331,8 @@ class Game:
         if self.paused:
             # Поверх окна: пауза работает и с открытым инвентарём, и её видно.
             self.hud.draw_pause(self.screen)
+        if self.sim.defeated:
+            self.hud.draw_defeat(self.screen, self.sim)
         if self.gallery_visible:
             self.gallery.draw(self.screen, hint="F4 или Esc — закрыть")
         self.debug.draw(self.screen, self.sim, self.camera, self.renderer,

@@ -97,6 +97,13 @@ class Building:
     #: Счётчики сделанного: добыто буром, собрано сборщиком.
     mined: int = 0
     made: int = 0
+    #: Прочность (M5): враги бьют здание, на нуле оно разрушается.
+    hp: float = 0.0
+    #: Оружие турели: перезарядка, сколько выстрелов осталось от единицы
+    #: боеприпаса и куда смотрит ствол (радианы, для рендера).
+    weapon_cooldown: float = 0.0
+    ammo_shots: int = 0
+    aim: float = 0.0
 
     # ---------------------------------------------------------- контейнеры
     def container(self, container_id: str | None) -> Container | None:
@@ -225,7 +232,8 @@ class BuildingSystem:
         if definition.analyzes is not None:
             jobs = [None] * containers[definition.analyzes].size
         building = Building(self._next_id, kind, int(x), int(y), containers, jobs,
-                            direction=direction or DIRECTIONS[0])
+                            direction=direction or DIRECTIONS[0],
+                            hp=float(definition.hp))
         self._next_id += 1
         self.buildings.append(building)
         return building

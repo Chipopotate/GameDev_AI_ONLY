@@ -96,6 +96,23 @@ class Hud:
         if not window_open:
             self._draw_prompt(target, sim)
 
+    def draw_defeat(self, target: pygame.Surface, sim: Simulation) -> None:
+        """Экран поражения (M5): причина и точка прорыва — кольцо на карте."""
+        target.blit(_pause_overlay(target.get_size()), (0, 0))
+        cx = config.WINDOW_W // 2
+        widgets.draw_text(target, "ПОРАЖЕНИЕ", (cx, 90), color=theme.DANGER,
+                          size=config.UI_FONT_SIZE_LARGE, align="center")
+        lines = [sim.defeat_reason or "Дрон уничтожен",
+                 f"День {sim.time_cycle.day_number}, потеряно построек: {sim.losses}, "
+                 f"убито врагов: {sim.enemies.killed}"]
+        if sim.breach_point is not None:
+            bx, by = sim.breach_point
+            lines.append(f"Точка прорыва: тайл {bx}, {by} (красное кольцо)")
+        lines.append("Esc — выход")
+        for i, line in enumerate(lines):
+            widgets.draw_text(target, line, (cx, 128 + i * 22), color=theme.UI_TEXT,
+                              size=config.UI_FONT_SIZE, align="center")
+
     def draw_pause(self, target: pygame.Surface) -> None:
         """Плашка паузы — самым верхним слоем: иначе её закрывало окно предметов."""
         self._draw_pause(target)
@@ -130,6 +147,8 @@ class Hud:
             f"Сид: {sim.seed}",
             f"Тайл: {sim.drone.tile()[0]}, {sim.drone.tile()[1]}",
             f"Зум: {camera.zoom:.1f}x",
+            f"Дрон: {max(0, int(sim.drone.hp))}/{config.DRONE_HP}",
+            f"Врагов: {sim.enemies.count()}   убито: {sim.enemies.killed}",
             f"Добыто: {sim.mined_total}",
             f"Слот {sim.selected_slot + 1}: {self._slot_name(sim)}",
             # Энергия сети (M4): выработка/спрос. Если выработки меньше, часть

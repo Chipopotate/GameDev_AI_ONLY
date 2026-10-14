@@ -18,7 +18,7 @@ from src.game.sim.time_cycle import DAY, NIGHT
 from src.game.ui import widgets
 
 RESERVED = {
-    "f1": "F1 — поле пути (этап M5)",
+    "f1": "F1 — поле пути Ходоков: красное — куда стекаются враги",
 }
 
 PHASE_NAMES = {DAY: "день", NIGHT: "ночь"}
@@ -66,7 +66,8 @@ class DebugOverlay:
             f"изучено {sum(1 for r in sim.relics if r.studied)}",
             f"зданий {renderer.buildings_drawn}/{len(sim.buildings.buildings)} в кадре, "
             f"скрафчено {sim.crafted_total}",
-            "врагов 0 (M5)",
+            f"врагов {sim.enemies.count()}, убито {sim.enemies.killed}, "
+            f"пересчётов поля {sim.enemies.fields['walker'].computes}",
         ]
         if self.show_path:
             lines.append(RESERVED["f1"])

@@ -30,7 +30,9 @@ import pygame
 
 from src.game import config
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR, LAB,
-                                     STORAGE, building as building_def)
+                                     STORAGE, TURRET, building as building_def)
+from src.game.data.enemies import enemy_type
+from src.game.sim.enemies import AMMO_ITEM, SHOT_DRONE, SHOT_ENEMY, SHOT_TURRET
 from src.game.data.relics import relic_def
 from src.game.data.terrain import Terrain
 from src.game.render import quality, theme
@@ -142,6 +144,8 @@ class Renderer:
         # Блик по воде — **отдельный** слой: он анимирован, а тьма дискретна, и
         # складывать их в один слой значило бы перерисовывать тьму каждый кадр.
         self.water = TileOverlay()
+        # Поле пути врагов (F1, M5) — отдельный слой, как отладочный слой света.
+        self.flow_overlay = TileOverlay()
         self.postfx = PostFX()
         self.particles = ParticlePool(0, self.sprites.factory)
         self.effects = EffectsDirector(self.particles, world.seed)
@@ -172,7 +176,8 @@ class Renderer:
     # ------------------------------------------------------------- мир
     def draw_world(self, target: pygame.Surface, sim: Simulation, camera: Camera,
                    show_lit_layer: bool = False, dt: float = config.TICK,
-                   ghost_tile: tuple[int, int] | None = None) -> None:
+                   ghost_tile: tuple[int, int] | None = None,
+                   show_flow: bool = False) -> None:
         """Кадр целиком. Камера сдвигается на время тряски и возвращается назад.
 
         `ghost_tile` — тайл под курсором, если призрак постройки нужно
@@ -189,7 +194,8 @@ class Renderer:
             camera.x += offset[0] / camera.scale
             camera.y += offset[1] / camera.scale
         try:
-            self._draw_scene(target, sim, camera, show_lit_layer, ghost_tile)
+            self._draw_scene(target, sim, camera, show_lit_layer, ghost_tile,
+                             show_flow)
         finally:
             # Камера — состояние приложения, а не рендера: сдвиг обязан вернуться,
             # иначе тряска уползла бы в логику (курсор считается от камеры).
@@ -199,7 +205,8 @@ class Renderer:
 
     def _draw_scene(self, target: pygame.Surface, sim: Simulation, camera: Camera,
                     show_lit_layer: bool,
-                    ghost_tile: tuple[int, int] | None = None) -> None:
+                    ghost_tile: tuple[int, int] | None = None,
+                    show_flow: bool = False) -> None:
         self.glows_drawn = 0
         self._marks.clear()
         self.chunks.draw(target, camera)
@@ -211,6 +218,7 @@ class Renderer:
         self._draw_drops(target, camera, sim)
         self._draw_building_bars(target, camera, sim)
         self._draw_drone(target, sim, camera)
+        self._draw_enemies(target, sim, camera)
         self._draw_bars(target, sim, camera)
         # Тьма — поверх мира, но под интерфейсом.
         self._draw_darkness(target, sim, camera)
@@ -218,6 +226,10 @@ class Renderer:
         self._draw_glows(target, sim, camera)
         self._draw_emissive(target, sim, camera)
         # Луч дрона — аддитивно и поверх тьмы: ночью он виден так же, как днём.
+        # Бой (M5) — поверх тьмы: глаза врагов, следы выстрелов и полосы
+        # прочности должны читаться и ночью (plan/09 §8: тело во тьме не видно,
+        # видны светящиеся глаза).
+        self._draw_combat(target, sim, camera)
         self.laser.draw(target, camera, sim.drone)
         # Кольцо разбора — тоже поверх тьмы: разбирают и то, что стоит вне
         # света дрона (🔧 `BUILD_RANGE` больше его радиуса), и под тьмой кольцо
@@ -233,6 +245,8 @@ class Renderer:
         self.postfx.draw(target, sim, sim.darkness)
         if show_lit_layer:
             self.draw_lit_layer(target, sim, camera)
+        if show_flow:
+            self.draw_flow_layer(target, sim, camera)
 
     # --------------------------------------------------- вода (анимация)
     def _draw_water_shimmer(self, target: pygame.Surface, camera: Camera) -> None:
@@ -364,6 +378,8 @@ class Renderer:
             if bdef.needs_power and not building.powered:
                 state = buildings.STATE_OFF
                 self._marks.append((sx, sy))
+            elif bdef.weapon is not None and not _armed(building):
+                state = buildings.STATE_OFF       # турель без боеприпасов молчит
             sprite = self.sprites.building(building.kind, state, size)
             target.blit(sprite, sprite.get_rect(center=(int(sx), int(sy))))
             self._draw_building_live(target, building, sx, sy, size, bdef)
@@ -436,6 +452,17 @@ class Renderer:
             self._draw_storage_fill(target, building, sx, sy, size)
         elif kind == GENERATOR:
             self._draw_generator_core(target, building, sx, sy, size, role)
+        elif kind == TURRET:
+            # Голова со стволом поворачивается к цели (plan/09 §5).
+            cos_a, sin_a = math.cos(building.aim), math.sin(building.aim)
+            tip = (sx + cos_a * size * 0.46, sy + sin_a * size * 0.46)
+            pygame.draw.line(target, theme.TURRET_BARREL, (sx, sy), tip,
+                             max(3, int(size * 0.16)))
+            pygame.draw.line(target, role if _armed(building) else theme.POWER_OFF,
+                             (sx, sy), tip, max(1, int(size * 0.07)))
+            factory.circle(target, theme.OUTLINE, sx, sy, size * 0.17)
+            factory.circle(target, role if _armed(building) else theme.POWER_OFF,
+                           sx, sy, size * 0.11)
 
     def _draw_belt(self, target: pygame.Surface, building, sx: float, sy: float,
                    size: int) -> None:
@@ -805,6 +832,108 @@ class Renderer:
             self._emissive_full_size = (w, h)
         return self._emissive_full
 
+    # ------------------------------------------------------------ враги (M5)
+    def _draw_enemies(self, target: pygame.Surface, sim: Simulation,
+                      camera: Camera) -> None:
+        """Тела врагов — до тьмы: во мраке они почти не видны (plan/09 §8)."""
+        x0, y0, x1, y1 = camera.visible_tiles(margin=1)
+        scale = camera.scale
+        for enemy in sim.enemies.enemies:
+            if not (x0 <= enemy.x <= x1 + 1 and y0 <= enemy.y <= y1 + 1):
+                continue
+            etype = enemy_type(enemy.kind)
+            size = max(8, int(scale * etype.size * 1.5))
+            art = self.sprites.creature(etype.shape, size,
+                                        self.anim_time * 2.4 + _phase(enemy.id))
+            sx, sy = camera.world_to_screen(enemy.x, enemy.y)
+            target.blit(art, art.get_rect(center=(int(sx), int(sy))))
+
+    def _draw_combat(self, target: pygame.Surface, sim: Simulation,
+                     camera: Camera) -> None:
+        """Глаза врагов, следы выстрелов, полосы прочности, точка прорыва."""
+        scale = camera.scale
+        x0, y0, x1, y1 = camera.visible_tiles(margin=1)
+        eye = max(2, int(scale * 0.16))
+        for enemy in sim.enemies.enemies:
+            if not (x0 <= enemy.x <= x1 + 1 and y0 <= enemy.y <= y1 + 1):
+                continue
+            sx, sy = camera.world_to_screen(enemy.x, enemy.y)
+            if quality.glow_enabled():
+                glow = self.sprites.factory.halo(eye, theme.ENEMY_EYE, 0.0, 0.8)
+                self.sprites.factory.blit_add(target, glow, (sx, sy))
+            hp_max = enemy_type(enemy.kind).hp
+            if enemy.hp < hp_max:
+                self._hp_bar(target, sx, sy - scale * 0.55, scale, enemy.hp / hp_max)
+        colors = {SHOT_TURRET: theme.SHOT_TURRET, SHOT_DRONE: theme.SHOT_DRONE,
+                  SHOT_ENEMY: theme.SHOT_ENEMY}
+        for shot in sim.enemies.shots:
+            a = camera.world_to_screen(shot.x0, shot.y0)
+            b = camera.world_to_screen(shot.x1, shot.y1)
+            pygame.draw.line(target, colors.get(shot.source, theme.UI_TEXT), a, b,
+                             2 if shot.source != SHOT_ENEMY else 1)
+        for building in sim.buildings.buildings:
+            hp_max = building_def(building.kind).hp
+            if building.hp < hp_max and x0 <= building.x <= x1 and y0 <= building.y <= y1:
+                sx, sy = camera.world_to_screen(building.x + 0.5, building.y + 0.5)
+                self._hp_bar(target, sx, sy - scale * 0.62, scale, building.hp / hp_max)
+        lamp_max = building_def("lamp").hp
+        for lamp in sim.light.lamps:
+            if lamp.hp < lamp_max and x0 <= lamp.x <= x1 and y0 <= lamp.y <= y1:
+                sx, sy = camera.world_to_screen(lamp.x + 0.5, lamp.y + 0.5)
+                self._hp_bar(target, sx, sy - scale * 0.62, scale, lamp.hp / lamp_max)
+        if sim.defeated and sim.breach_point is not None:
+            bx, by = sim.breach_point
+            sx, sy = camera.world_to_screen(bx + 0.5, by + 0.5)
+            pulse = 0.5 + 0.5 * math.sin(self.anim_time * 5.0)
+            radius = int(scale * (0.9 + 0.5 * pulse))
+            pygame.draw.circle(target, theme.BREACH_RING, (int(sx), int(sy)), radius, 3)
+            pygame.draw.circle(target, theme.BREACH_RING, (int(sx), int(sy)),
+                               radius + int(scale * 0.6), 1)
+
+    @staticmethod
+    def _hp_bar(target: pygame.Surface, sx: float, sy: float, scale: float,
+                frac: float) -> None:
+        w = max(10, int(scale * 0.8))
+        h = max(2, int(scale * 0.09))
+        x, y = int(sx - w / 2), int(sy)
+        pygame.draw.rect(target, theme.OUTLINE, (x - 1, y - 1, w + 2, h + 2))
+        filled = int(w * max(0.0, min(1.0, frac)))
+        if filled > 0:
+            pygame.draw.rect(target, theme.HP_BAR_FG, (x, y, filled, h))
+
+    def draw_flow_layer(self, target: pygame.Surface, sim: Simulation,
+                        camera: Camera) -> None:
+        """F1: поле пути Ходоков — тепловая карта (plan/07 §11).
+
+        Красное — «ближе» к цели (туда враги стекаются), синее — дальше;
+        тайлы, куда пути нет, прозрачные. Стены и здания на поле — дорогие
+        тайлы, поэтому слабое место обороны видно как красный коридор.
+        """
+        field = sim.enemies.fields.get("walker")
+        if field is None:
+            return
+        x0, y0, x1, y1 = camera.visible_tiles(margin=1)
+        h, w = y1 - y0 + 1, x1 - x0 + 1
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        ix0, iy0 = max(x0, 0), max(y0, 0)
+        ix1, iy1 = min(x1, self.world.width - 1), min(y1, self.world.height - 1)
+        if ix0 <= ix1 and iy0 <= iy1:
+            block = field.dist[iy0:iy1 + 1, ix0:ix1 + 1]
+            finite = np.isfinite(block)
+            if finite.any():
+                # Шкала по 90-му перцентилю: дорогие тайлы стен иначе забирали бы
+                # весь диапазон, и весь пол красился бы одним цветом.
+                lo = float(block[finite].min())
+                hi = float(np.percentile(block[finite], 90))
+                t = np.clip(np.where(finite, (block - lo) / max(1e-6, hi - lo), 0.0),
+                            0.0, 1.0)
+                view = rgba[iy0 - y0:iy1 - y0 + 1, ix0 - x0:ix1 - x0 + 1]
+                view[..., 0] = (255 * (1.0 - t)).astype(np.uint8)
+                view[..., 1] = (60 * (1.0 - t)).astype(np.uint8)
+                view[..., 2] = (255 * t).astype(np.uint8)
+                view[..., 3] = np.where(finite, 110, 0).astype(np.uint8)
+        self.flow_overlay.draw(target, camera, x0, y0, rgba, smooth=False)
+
     # ------------------------------------------------------ отладочный слой
     def draw_lit_layer(self, target: pygame.Surface, sim: Simulation,
                        camera: Camera) -> None:
@@ -942,6 +1071,14 @@ class Renderer:
 def _shake_offset(amplitude: float, t: float) -> tuple[float, float]:
     """Смещение камеры при тряске: две несоизмеримые частоты, чтобы не мигало."""
     return (math.sin(t * 47.0) * amplitude, math.cos(t * 61.0) * amplitude)
+
+
+def _armed(building) -> bool:
+    """Есть ли у турели чем стрелять: начатая единица или боеприпас в контейнере."""
+    if building.ammo_shots > 0:
+        return True
+    ammo = building.container(building_def(building.kind).input_id)
+    return ammo is not None and ammo.count(AMMO_ITEM) > 0
 
 
 def _phase(index: int) -> float:

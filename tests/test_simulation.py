@@ -201,7 +201,8 @@ def test_dusk_and_dawn_are_reported_to_the_player(sim):
     """Смена фазы видна игроком: иначе ночь наступила бы незаметно."""
     first_day, _day, night = config.TIME_TABLE[config.PLANET]
     run(sim, first_day + 0.1)
-    assert [t.text for t in sim.toasts] == ["Ночь 1"]
+    texts = [t.text for t in sim.toasts]
+    assert len(texts) == 1 and texts[0].startswith("Ночь 1"), texts
     run(sim, night)  # до рассвета (сообщение о закате к этому моменту уже истекло)
     assert sim.time_cycle.day_number == 2
     assert [t.text for t in sim.toasts] == ["День 2"]

@@ -41,7 +41,8 @@ from src.game.sim.simulation import ENERGY_ITEM, Simulation
 from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_SCAN,
                                 ACTION_STUDY)
 from src.game.sim.world import Deposit, World
-from tests.conftest import SEED, give_building, make_world, place, slot_of
+from tests.conftest import (SEED, STOCK_BUILDINGS, give_building, make_world, place,
+                            slot_of)
 
 # ------------------------------------------------------------------ сцена
 SIZE = 16
@@ -621,7 +622,7 @@ def test_ghost_agrees_with_place_building_on_random_tiles(factory, needed):
                 if sim.world.is_walkable_tile(nx, ny):
                     sim.drone.x, sim.drone.y = nx + 0.5, ny + 0.5
                     break
-        kind = rng.choice(BUILD_ORDER)
+        kind = rng.choice(STOCK_BUILDINGS)
         tx, ty = sim.drone.tile()
         x, y = tx + rng.randint(-reach, reach), ty + rng.randint(-reach, reach)
         if sim.hotbar.count(kind) == 0:
@@ -1036,7 +1037,8 @@ def test_start_buildings_are_craftable_on_1000_seeds():
     for seed in range(1000):
         run_plan = generate_run(seed)
         assert run_plan.craftable_at_start(), f"seed {seed}: стартовые постройки"
-        stock = Container(len(run_plan.items.common_ids) * 5)
+        slots = -(-per_resource // config.SLOT_STACK_MAX)   # стаков на ресурс
+        stock = Container(len(run_plan.items.common_ids) * slots)
         for item_id in run_plan.items.common_ids:
             assert stock.add(item_id, per_resource) == 0
         assert_first_night_craftable(stock, run_plan, f"seed {seed}")

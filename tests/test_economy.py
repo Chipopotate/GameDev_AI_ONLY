@@ -24,8 +24,9 @@ from src.game import config
 from src.game.data.buildings import (ASSEMBLER, BUILD_ORDER, CONVEYOR, DRILL,
                                      GENERATOR, LAB, LAMP, PORT_FUEL, PORT_IN,
                                      PORT_OUT, PORT_STORE, ROLE_AUTOMATION,
-                                     ROLE_ENERGY, ROLE_STRUCTURE, STORAGE, WIRE,
-                                     WORK_CRAFT, building as building_def)
+                                     ROLE_AMMO, ROLE_ENERGY, ROLE_STRUCTURE,
+                                     STORAGE, TURRET, WALL, WIRE, WORK_CRAFT,
+                                     building as building_def)
 from src.game.data.recipes import ROLES, recipe as recipe_def
 from src.game.data.resources import PROP_NAMES, Prop
 from src.game.data.terrain import Terrain
@@ -219,6 +220,8 @@ def test_buildings_unlock_by_the_base_relic_of_their_role():
         DRILL: ROLE_AUTOMATION, CONVEYOR: ROLE_AUTOMATION,
         WIRE: ROLE_AUTOMATION, ASSEMBLER: ROLE_AUTOMATION,
         GENERATOR: ROLE_ENERGY,
+        # M5: турель открывает реликвия «боеприпас», стену — «конструкции».
+        TURRET: ROLE_AMMO, WALL: ROLE_STRUCTURE,
     }
     assert {kind: building_def(kind).unlock_role for kind in BUILD_ORDER} == expected
 
@@ -226,7 +229,7 @@ def test_buildings_unlock_by_the_base_relic_of_their_role():
     for kind, role in expected.items():
         known = sim.knowledge.is_known(building_def(kind).recipe.id)
         assert known == (role is None), f"{kind}: неверно известна на старте"
-    for role in (ROLE_STRUCTURE, ROLE_AUTOMATION, ROLE_ENERGY):
+    for role in (ROLE_STRUCTURE, ROLE_AUTOMATION, ROLE_ENERGY, ROLE_AMMO):
         relic = sim.run.relic_of(role)
         assert relic is not None and sim.study_relic(relic), f"реликвия {role}"
         for kind, unlock in expected.items():

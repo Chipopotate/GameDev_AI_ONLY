@@ -38,6 +38,8 @@ WIRE = "wire"
 STORAGE = "storage"
 ASSEMBLER = "assembler"
 GENERATOR = "generator"
+TURRET = "turret"
+WALL = "wall"
 
 #: Роли контейнеров: куда конвейер кладёт и откуда берёт.
 PORT_IN = "in"          # принимает предметы (вход сборщика, образцы лаборатории)
@@ -55,7 +57,8 @@ LAB_SAMPLES = "samples"
 
 #: Порядок построек: в нём предметы-постройки лежат в таблице забега (и в
 #: галерее). Клавиш «режима стройки» больше нет — постройка ставится из хотбара.
-BUILD_ORDER = (LAMP, LAB, DRILL, CONVEYOR, WIRE, STORAGE, ASSEMBLER, GENERATOR)
+BUILD_ORDER = (LAMP, LAB, DRILL, CONVEYOR, WIRE, STORAGE, ASSEMBLER, GENERATOR,
+               TURRET, WALL)
 
 #: На какой тайл ставится здание: свободная земля или залежь (бур).
 PLACE_GROUND = "ground"
@@ -79,6 +82,23 @@ class ContainerDef:
 ROLE_STRUCTURE = "structure"
 ROLE_AUTOMATION = "automation"
 ROLE_ENERGY = "energy"
+ROLE_AMMO = "ammo"
+
+
+@dataclass(frozen=True)
+class WeaponDef:
+    """Модуль оружия на стационарном корпусе (plan/04): турель = корпус + модуль.
+
+    Мастерская и сборка корпуса с модулями — M7; до неё турель описана в
+    данных готовым сочетанием, но поля те же, что будут у модуля.
+    """
+
+    id: str
+    range: float          # тайлы
+    damage: float
+    cooldown: float       # с между выстрелами
+    #: Сколько выстрелов даёт одна единица предмета «боеприпас».
+    shots_per_ammo: int
 
 
 def _item_recipe(kind: str, requires: tuple[tuple[Prop, int], ...],
@@ -128,6 +148,10 @@ class BuildingDef:
     conducts: bool = False
     #: Топливо генератора: свойство предмета (сырьё с 🔥) или id (предмет роли).
     fuel: tuple[Prop | str, ...] = ()
+    #: Оружие (у турели): стреляет само по ближайшему врагу в радиусе (M5).
+    weapon: WeaponDef | None = None
+    #: Корпус (plan/04): «static» у турели и стены. Пока только метка данных.
+    chassis: str | None = None
 
     # --------------------------------------------------------------- порты
     def _first(self, role: str) -> str | None:
@@ -230,6 +254,27 @@ BUILDING_TYPES: dict[str, BuildingDef] = {
         unlock_role=ROLE_ENERGY,
         hp=80, enemy_priority=7, power_out=6.0,
         fuel=(Prop.FLAMMABLE, "energy"),
+    ),
+    # Турель (M5): стационарный корпус + модуль «быстрое оружие». Боеприпасы —
+    # предмет роли «боеприпас» в контейнере `ammo` (его же довозит конвейер).
+    TURRET: BuildingDef(
+        TURRET, "Турель", "hexagon", (232, 120, 96),
+        containers=(ContainerDef("ammo", "Боеприпасы", 2, 2, PORT_IN),),
+        recipe=_item_recipe(TURRET, ((Prop.TOUGH, 3), (Prop.UNSTABLE, 2)), 3.0),
+        unlock_role=ROLE_AMMO,
+        hp=150, enemy_priority=8, chassis="static",
+        weapon=WeaponDef("gun_fast", range=config.TURRET_RANGE,
+                         damage=config.TURRET_DAMAGE, cooldown=config.TURRET_COOLDOWN,
+                         shots_per_ammo=config.TURRET_SHOTS_PER_AMMO),
+    ),
+    # Стена (plan/03): блок с минимальным приоритетом у врагов. Для поля пути
+    # это дорогой тайл, а не непроходимый (plan/05): враг ломает её, только
+    # если обхода нет.
+    WALL: BuildingDef(
+        WALL, "Стена", "square", (150, 156, 170),
+        recipe=_item_recipe(WALL, ((Prop.TOUGH, 1),), 0.5),
+        unlock_role=ROLE_STRUCTURE,
+        hp=300, enemy_priority=1, chassis="static",
     ),
 }
 

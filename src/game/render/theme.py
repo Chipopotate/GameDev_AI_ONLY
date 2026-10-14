@@ -177,6 +177,15 @@ def laser_color(kind: str | None) -> Color:
 def laser_core(kind: str | None) -> Color:
     return ACTION_CORES.get(kind or "", LASER_BLUE_CORE)
 
+# Бой (M5): следы выстрелов и полосы прочности.
+SHOT_TURRET = NEON_AMBER
+SHOT_DRONE = NEON_ICE
+SHOT_ENEMY = FOE_TOXIC
+HP_BAR_FG = rgb("#e8545c")
+ENEMY_EYE = FOE_TOXIC
+BREACH_RING = rgb("#ff3b5c")
+TURRET_BARREL = rgb("#1a1f29")
+
 # Экономика и энергия
 POWER_OFF = rgb("#464a58")          # куда уходит цвет здания без энергии
 WIRE_LINE = NEON_AZURE

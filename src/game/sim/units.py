@@ -49,6 +49,8 @@ class Drone:
     alive: bool = True
     #: Текущее действие для рендера (луч лазера). Ставит симуляция каждый шаг.
     action: DroneAction = field(default_factory=DroneAction)
+    #: Перезарядка слабого оружия дрона (M5), с.
+    gun_cooldown: float = 0.0
 
     @classmethod
     def spawn(cls, world: World) -> "Drone":

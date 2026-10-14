@@ -34,6 +34,8 @@ class Lamp:
     y: int
     radius: float = config.LAMP_LIGHT_RADIUS
     on: bool = True
+    #: Прочность (M5): ставит симуляция из данных лампы, враги её бьют.
+    hp: float = 0.0
 
 
 class LightSystem:

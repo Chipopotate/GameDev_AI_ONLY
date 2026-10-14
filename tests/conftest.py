@@ -11,7 +11,8 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from src.game import config  # noqa: E402
-from src.game.data.buildings import (BUILD_ORDER, GENERATOR, LAMP,  # noqa: E402
+from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL,  # noqa: E402
+                                     GENERATOR, LAB, LAMP, STORAGE, WIRE,
                                      building as building_def)
 from src.game.data.recipes import ROLES  # noqa: E402
 from src.game.data.resources import Prop  # noqa: E402
@@ -24,6 +25,11 @@ SEED = 20251013
 
 #: По стаку каждого предмета роли — столько даёт `stock` (лимит стека = 1 слот).
 STOCK_COUNT = 30
+
+#: Постройки экономики (M4), которые выдаёт `stock`: ровно восемь — они ложатся
+#: в первые слоты хотбара, и тесты на это опираются. Оборону M5 (турель,
+#: стена) тесты выдают себе сами, если она им нужна.
+STOCK_BUILDINGS = (LAMP, LAB, DRILL, CONVEYOR, WIRE, STORAGE, ASSEMBLER, GENERATOR)
 
 
 def stock(sim: Simulation, count: int = STOCK_COUNT) -> Simulation:
@@ -41,7 +47,7 @@ def stock(sim: Simulation, count: int = STOCK_COUNT) -> Simulation:
     # переполнять хранилище дрона.
     for role in ROLES:
         sim.inventory.add(role.id, max(0, count - sim.cargo.count(role.id)))
-    for kind in BUILD_ORDER:
+    for kind in STOCK_BUILDINGS:
         missing = config.BUILDING_STACK - sim.cargo.count(kind)
         if missing > 0:
             give_building(sim, kind, missing)

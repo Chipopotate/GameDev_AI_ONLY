@@ -24,7 +24,7 @@ import math
 import pygame
 
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR,
-                                     LAB, LAMP, STORAGE, WIRE)
+                                     LAB, LAMP, STORAGE, TURRET, WALL, WIRE)
 from src.game.render import theme
 from src.game.render.sprites import factory
 
@@ -45,6 +45,8 @@ ROLE_COLOR: dict[str, tuple[int, int, int]] = {
     STORAGE: theme.STEEL_LIGHT,
     ASSEMBLER: theme.hue_shift(theme.NEON_CYAN, 60),
     GENERATOR: theme.NEON_AMBER,
+    TURRET: theme.NEON_CYAN,
+    WALL: theme.STEEL_LIGHT,
 }
 
 
@@ -287,6 +289,27 @@ def _draw_generator(surf: pygame.Surface, s: float, body, role) -> None:
                       max(1, s * 0.02))
 
 
+def _draw_turret(surf: pygame.Surface, s: float, body, role) -> None:
+    """Турель: статичная восьмигранная основа (голова со стволом — живой слой)."""
+    c = s / 2.0
+    pts = factory.polygon_points(c, c, s * 0.44, 8, math.pi / 8)
+    pygame.draw.polygon(surf, theme.OUTLINE, pts)
+    pygame.draw.polygon(surf, theme.darken(body, 0.25), pts)
+    inner = factory.polygon_points(c, c, s * 0.34, 8, math.pi / 8)
+    pygame.draw.polygon(surf, body, inner)
+    factory.ring(surf, role, c, c, s * 0.30, max(1, s * 0.02))
+
+
+def _draw_wall(surf: pygame.Surface, s: float, body, role) -> None:
+    """Стена: массивный блок с фаской и бороздками (plan/09 §5)."""
+    rect = _rect(s, 0.03)
+    factory.bevel_frame(surf, rect, theme.lighten(body, 0.08), s * 0.04)
+    for k in (0.36, 0.64):
+        y = rect.top + rect.height * k
+        pygame.draw.line(surf, theme.darken(body, 0.45), (rect.left + s * 0.08, y),
+                         (rect.right - s * 0.08, y), max(1, int(s * 0.03)))
+
+
 _DRAW = {
     LAMP: _draw_lamp,
     LAB: _draw_lab,
@@ -296,6 +319,8 @@ _DRAW = {
     STORAGE: _draw_storage,
     ASSEMBLER: _draw_assembler,
     GENERATOR: _draw_generator,
+    TURRET: _draw_turret,
+    WALL: _draw_wall,
 }
 
 

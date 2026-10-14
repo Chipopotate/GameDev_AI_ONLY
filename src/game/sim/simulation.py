@@ -38,11 +38,13 @@ from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES,
                                      WORK_MOVE, building as building_def,
                                      unlocked_by)
 from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
+from src.game.data.enemies import SHADOW, WALKER, enemy_type
 from src.game.data.resources import PROP_NAMES, Prop
 from src.game.sim.buildings import DIRECTIONS, Building, BuildingSystem, CraftResult
 from src.game.sim.commands import (Command, DismantleBuilding, PlaceBuilding,
                                    SelectHotbar)
 from src.game.sim.drops import DropSystem
+from src.game.sim.enemies import EnemySystem
 from src.game.sim.light import Lamp, LightSystem
 from src.game.sim.power import PowerNode, PowerSystem
 from src.game.sim.research import KnownItems, Knowledge, plan_craft
@@ -142,6 +144,17 @@ class Simulation:
         self.time_cycle = TimeCycle()
         self.light = LightSystem(self.world)
         self.power = PowerSystem()
+        # Враги (M5): свой поток случайности — спавн не должен сдвигать скан.
+        self.enemies = EnemySystem(self.world,
+                                   random.Random(seed ^ config.ENEMY_RNG_SALT))
+        #: Поражение (plan/00: смерть дрона). Пока оно есть, `update` стоит.
+        self.defeated = False
+        self.defeat_reason: str | None = None
+        #: Точка прорыва для экрана поражения: где оборона впервые сломалась
+        #: (первое разрушенное здание), иначе — где враг добил дрона.
+        self.breach_point: tuple[int, int] | None = None
+        self.losses = 0
+        self._shadow_timer = 0.0
 
         self.time = 0.0
         self.move_input: tuple[float, float] = (0.0, 0.0)
@@ -271,7 +284,7 @@ class Simulation:
     # ------------------------------------------------------------ обновление
     def update(self, dt: float) -> None:
         """Один фиксированный шаг симуляции."""
-        if dt <= 0.0:
+        if dt <= 0.0 or self.defeated:
             return
         self.time += dt
         self._update_time(dt)
@@ -283,6 +296,7 @@ class Simulation:
         # у него энергия (M4). Топливо горит уже после пересчёта — по спросу.
         self._update_power(dt)
         self._update_buildings(dt)
+        self._update_enemies(dt)
         self._update_drops(dt)
         self._update_toasts(dt)
 
@@ -290,9 +304,64 @@ class Simulation:
         """Часы забега и реакции на смену фазы."""
         for event in self.time_cycle.update(dt):
             if event == EVENT_DUSK:
-                self.toast(f"Ночь {self.time_cycle.day_number}")
+                day = self.time_cycle.day_number
+                count = config.WAVE_WALKERS_BASE + config.WAVE_WALKERS_PER_DAY * (day - 1)
+                made = self.enemies.spawn_dark(self, WALKER, count)
+                self.toast(f"Ночь {day}: идут {enemy_type(WALKER).name.lower()}и ×{made}")
+                self._shadow_timer = 0.0
             elif event == EVENT_DAWN:
+                # Тени живут только в темноте: рассвет их растворяет (plan/05).
+                self.enemies.remove_kind(SHADOW)
                 self.toast(f"День {self.time_cycle.day_number}")
+
+    # ---------------------------------------------------------- враги (M5)
+    def _update_enemies(self, dt: float) -> None:
+        """Тени рождаются в темноте, пока идёт ночь; затем шаг всех врагов."""
+        if self.time_cycle.is_night:
+            self._shadow_timer += dt
+            if self._shadow_timer >= config.SHADOW_SPAWN_INTERVAL:
+                self._shadow_timer = 0.0
+                if self.enemies.count(SHADOW) < config.SHADOW_MAX:
+                    self.enemies.spawn_dark(self, SHADOW, 1)
+        self.enemies.update(self, dt)
+
+    def damage_structure(self, target: Building | Lamp, damage: float) -> None:
+        """Удар врага по постройке. На нуле прочности она разрушается."""
+        target.hp -= damage
+        if target.hp <= 0.0:
+            self.destroy_by_enemy(target)
+
+    def destroy_by_enemy(self, target: Building | Lamp) -> None:
+        """Разрушение врагом (plan/03): часть содержимого выпадает, постройка теряется.
+
+        В отличие от разбора, предмет постройки не возвращается, а из
+        контейнеров выпадает только 🔧 `ENEMY_DESTROY_DROP_RATIO`.
+        """
+        if isinstance(target, Lamp):
+            if not self.light.remove_lamp(target):
+                return
+            name = building_def(BUILD_LAMP).name
+        else:
+            if not self.demolish(target, config.ENEMY_DESTROY_DROP_RATIO):
+                return
+            name = building_def(target.kind).name
+        self.losses += 1
+        if self.breach_point is None:
+            self.breach_point = (target.x, target.y)
+        self.toast(f"Потеряно: {name}")
+
+    def damage_drone(self, damage: float, enemy) -> None:
+        """Удар по дрону. Смерть дрона — поражение (plan/00)."""
+        if self.defeated:
+            return
+        self.drone.hp -= damage
+        if self.drone.hp <= 0.0:
+            self.drone.hp = 0
+            self.drone.alive = False
+            self.defeated = True
+            self.defeat_reason = f"Дрон уничтожен: {enemy.type.name}"
+            if self.breach_point is None:
+                self.breach_point = enemy.tile
 
     # ---------------------------------------------------- работа руками
     def _update_actions(self, dt: float) -> None:
@@ -1048,7 +1117,9 @@ class Simulation:
         if kind == BUILD_LAMP:
             # Лампа ставится **выключенной**: с M4 она горит, только пока её
             # питает сеть, и решение принимает `_update_power` на ближайшем шаге.
-            return self.light.add_lamp(x, y, on=False)
+            lamp = self.light.add_lamp(x, y, on=False)
+            lamp.hp = float(building_def(BUILD_LAMP).hp)
+            return lamp
         return self.buildings.add(kind, x, y, direction)
 
     def build(self, kind: str, x: int, y: int,
@@ -1157,6 +1228,8 @@ class Simulation:
             tuple((r.id, r.x, r.y, r.studied) for r in self.run.relics),
             self.scans_done,
             self.crafted_total,
+            self.enemies.state(),
+            self.defeated,
         )
 
     @property

@@ -36,6 +36,8 @@ from src.game.data.terrain import Terrain
 from src.game.render import quality, theme
 from src.game.render.camera import Camera
 from src.game.render.effects import EffectsDirector, ParticlePool
+from src.game.render.effects.laser import LaserBeam
+from src.game.render.ghost import GhostPreview
 from src.game.render.icons import IconCache
 from src.game.render.overlay import TileOverlay
 from src.game.render.postfx import PostFX
@@ -108,6 +110,9 @@ NO_POWER_OFFSET = (0.30, -0.30)
 NO_POWER_BLINK_HZ = 1.2
 FILL_BAR_WIDTH = 0.60      # доля тайла под полоску заполнения склада
 BAR_WIDTH = 0.90           # доля тайла под полосу прогресса
+#: Кольцо прогресса демонтажа: радиус в долях тайла и толщина в долях тайла.
+DISMANTLE_RING_R = 0.62
+DISMANTLE_RING_W = 0.10
 WATER_GLINT_ALPHA = 46     # плотность блика по воде, 0..255
 
 
@@ -129,6 +134,10 @@ class Renderer:
         self.postfx = PostFX()
         self.particles = ParticlePool(0, self.sprites.factory)
         self.effects = EffectsDirector(self.particles, world.seed)
+        # Луч дрона и призрак постройки — отдельные объекты со своими кэшами:
+        # оба только читают симуляцию (`drone.action`, `sim.can_place`).
+        self.laser = LaserBeam(self.sprites.factory, self.particles, world.seed)
+        self.ghost = GhostPreview(self.sprites)
         # Пятна света: ключ — (вид источника, радиус, яркость). Ровно по одному
         # на источник, и между кадрами они не пересоздаются.
         self._glow_cache: dict[tuple[str, int, int], pygame.Surface] = {}
@@ -151,10 +160,17 @@ class Renderer:
 
     # ------------------------------------------------------------- мир
     def draw_world(self, target: pygame.Surface, sim: Simulation, camera: Camera,
-                   show_lit_layer: bool = False, dt: float = config.TICK) -> None:
-        """Кадр целиком. Камера сдвигается на время тряски и возвращается назад."""
+                   show_lit_layer: bool = False, dt: float = config.TICK,
+                   ghost_tile: tuple[int, int] | None = None) -> None:
+        """Кадр целиком. Камера сдвигается на время тряски и возвращается назад.
+
+        `ghost_tile` — тайл под курсором, если призрак постройки нужно
+        показать (курсор над картой, окна закрыты); None — призрака нет.
+        `dt == 0` — пауза: картинка замирает, а не исчезает.
+        """
         self.anim_time += dt
         self.effects.update(sim, dt)
+        self.laser.update(sim.drone.action, dt)
         shake = self.effects.shake
         offset = (0.0, 0.0)
         if shake > 0.01:
@@ -162,7 +178,7 @@ class Renderer:
             camera.x += offset[0] / camera.scale
             camera.y += offset[1] / camera.scale
         try:
-            self._draw_scene(target, sim, camera, show_lit_layer)
+            self._draw_scene(target, sim, camera, show_lit_layer, ghost_tile)
         finally:
             # Камера — состояние приложения, а не рендера: сдвиг обязан вернуться,
             # иначе тряска уползла бы в логику (курсор считается от камеры).
@@ -171,7 +187,8 @@ class Renderer:
                 camera.y -= offset[1] / camera.scale
 
     def _draw_scene(self, target: pygame.Surface, sim: Simulation, camera: Camera,
-                    show_lit_layer: bool) -> None:
+                    show_lit_layer: bool,
+                    ghost_tile: tuple[int, int] | None = None) -> None:
         self.glows_drawn = 0
         self._marks.clear()
         self.chunks.draw(target, camera)
@@ -189,6 +206,11 @@ class Renderer:
         # Свет и неон — уже поверх тьмы: иначе ночью их не было бы видно.
         self._draw_glows(target, sim, camera)
         self._draw_emissive(target, sim, camera)
+        # Луч дрона — аддитивно и поверх тьмы: ночью он виден так же, как днём.
+        self.laser.draw(target, camera, sim.drone)
+        # Призрак постройки — подсказка игроку, а не часть мира: поверх тьмы,
+        # иначе ночью нельзя было бы понять, встанет ли здание.
+        self.ghost.draw(target, sim, camera, ghost_tile)
         # Значки состояния — сигнал игроку, а не часть мира: их не закрывает
         # ни соседняя постройка, ни ночь.
         self._draw_status_marks(target, camera)
@@ -845,6 +867,33 @@ class Renderer:
                                sim.study_target.y + 0.5, sim.study_progress,
                                theme.STUDY_BAR_FG,
                                dy=-int(config.TILE * camera.zoom * 0.66))
+        if sim.dismantle_target is not None and sim.dismantle_progress > 0.0:
+            self._dismantle_ring(target, camera, sim.dismantle_target,
+                                 sim.dismantle_progress)
+
+    @staticmethod
+    def _dismantle_ring(target: pygame.Surface, camera: Camera, building,
+                        progress: float) -> None:
+        """Кольцо прогресса демонтажа над зданием (plan/03): примитивами, без Surface.
+
+        Полоса растёт по часовой от «двенадцати»: так её читают в любой игре,
+        а полная окружность значит «сейчас снимется».
+        """
+        sx, sy = camera.world_to_screen(building.x + 0.5, building.y + 0.5)
+        radius = max(6, int(camera.scale * DISMANTLE_RING_R))
+        width = max(2, int(camera.scale * DISMANTLE_RING_W))
+        rect = pygame.Rect(0, 0, radius * 2, radius * 2)
+        rect.center = (int(sx), int(sy))
+        pygame.draw.circle(target, theme.OUTLINE, rect.center, radius + 1, width + 2)
+        pygame.draw.circle(target, theme.DISMANTLE_RING_BG, rect.center, radius, width)
+        frac = max(0.0, min(1.0, progress))
+        if frac <= 0.0:
+            return
+        # pygame считает углы против часовой от «трёх часов»: часовая стрелка
+        # от «двенадцати» — это от π/2 вниз.
+        top = math.pi / 2.0
+        pygame.draw.arc(target, theme.DISMANTLE_RING, rect, top - math.tau * frac,
+                        top, width)
 
     def _progress_bar(self, target: pygame.Surface, camera: Camera, wx: float,
                       wy: float, frac: float, color: tuple[int, int, int],

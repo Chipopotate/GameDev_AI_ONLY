@@ -21,7 +21,6 @@ from src.game import config
 from src.game.data.buildings import WORK_MOVE, building as building_def
 from src.game.render import theme
 from src.game.render.camera import Camera
-from src.game.render.quality import glow_enabled
 from src.game.render.sprites import SpriteCache
 
 #: Во сколько раз сторона куска кэша ореола больше шага сетки: размеры кольца
@@ -127,10 +126,9 @@ class GhostPreview:
         """Кольцо досягаемости вокруг дрона, пока призрак активен.
 
         Без него «красный призрак» на границе радиуса выглядит поломкой: игрок
-        не видит, где эта граница. Кольцо тусклое — подсказка, а не украшение.
+        не видит, где эта граница. Кольцо тусклое — подсказка, а не украшение,
+        поэтому оно рисуется на любом уровне графики (это не свечение).
         """
-        if not glow_enabled():
-            return
         drone = sim.drone
         sx, sy = camera.world_to_screen(drone.x, drone.y)
         ring = self.range_ring(max(2, int(config.BUILD_RANGE * camera.scale)))

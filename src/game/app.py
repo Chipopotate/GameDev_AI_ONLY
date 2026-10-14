@@ -16,18 +16,24 @@ from src.game import config
 from src.game.render.camera import Camera
 from src.game.render.gallery import Gallery
 from src.game.render.renderer import Renderer
-from src.game.sim.simulation import BUILDINGS, Simulation
+from src.game.sim.commands import PlaceBuilding, SelectHotbar
+from src.game.sim.simulation import Simulation
 from src.game.ui import fonts, widgets
 from src.game.ui.debug import DebugOverlay
 from src.game.ui.hud import Hud
 from src.game.ui.item_window import MODE_CONTAINER, ItemWindow
-from src.game.ui.recipe_book import RecipeBook
+from src.game.ui.state import UiState
 
 # Допуск при сравнении накопленного времени с шагом симуляции.
 TICK_EPS = 1e-9
 
-#: Клавиши выбора постройки: 1, 2, … по порядку `sim.BUILDINGS`.
-BUILD_KEYS = {pygame.K_1 + i: kind for i, kind in enumerate(BUILDINGS)}
+#: Клавиши слотов хотбара: 1…9 (plan/10). Режима «что строить» больше нет —
+#: постройка ставится из выбранного слота.
+HOTBAR_KEYS = {pygame.K_1 + i: i for i in range(config.HOTBAR_SLOTS)}
+
+#: Клавиши, которые в поле поиска что-то значат. Остальные — просто текст
+#: (он приходит событием TEXTINPUT) и в игру не уходят.
+TEXT_SUBMIT_KEYS = (pygame.K_RETURN, pygame.K_KP_ENTER)
 
 
 class Game:
@@ -50,9 +56,11 @@ class Game:
                              viewport_h=view_h)
         self.camera.clamp_to(self.sim.world.width, self.sim.world.height)
         self.renderer = Renderer(self.sim.world)
+        # Кто сейчас забирает клавиатуру (поле поиска): один флаг на всё
+        # приложение — `ui.text_input_active` (plan/10).
+        self.ui = UiState()
         self.hud = Hud(self.renderer.icons)
-        self.book = RecipeBook(self.renderer.icons)
-        self.item_window = ItemWindow(self.renderer.icons)
+        self.item_window = ItemWindow(self.renderer.icons, self.ui)
         self.debug = DebugOverlay()
         # Галерея спрайтов (plan/09 §12): F4 — сравнить все формы на одном экране.
         self.gallery = Gallery(self.renderer.sprites, self.renderer.icons,
@@ -76,14 +84,18 @@ class Game:
 
     # ------------------------------------------------------------- ввод
     def poll_input(self) -> None:
-        """Непрерывный ввод (движение, добыча, скан) — читается каждый кадр.
+        """Непрерывный ввод (движение, добыча, скан, разбор) — каждый кадр.
 
-        Пока открыто окно (книга рецептов или слоты), кнопки мыши принадлежат
-        ему: иначе игрок крафтил бы и добывал одним движением руки.
+        Пока открыто окно, кнопки мыши принадлежат ему: иначе игрок крафтил бы
+        и добывал одним движением руки. Пока идёт ввод текста (поиск), WASD —
+        это буквы, а не движение.
         """
         keys = pygame.key.get_pressed()
-        move_x = float(keys[pygame.K_d]) - float(keys[pygame.K_a])
-        move_y = float(keys[pygame.K_s]) - float(keys[pygame.K_w])
+        if self.ui.text_input_active:
+            move_x = move_y = 0.0
+        else:
+            move_x = float(keys[pygame.K_d]) - float(keys[pygame.K_a])
+            move_y = float(keys[pygame.K_s]) - float(keys[pygame.K_w])
         self.sim.set_move_input(move_x, move_y)
         self.sim.set_cursor_tile(*self.tile_at_screen(None))
         # Окно здания живёт, пока дрон рядом: отошёл — оно закрылось
@@ -92,9 +104,10 @@ class Game:
                 and not self.sim.building_reachable(self.item_window.building):
             self.item_window.close(self.sim)
         buttons = pygame.mouse.get_pressed()
-        # Галерея — режим просмотра: под ней по карте не строят и не добывают.
-        held = (not self.book.visible and not self.item_window.visible
-                and not self.gallery_visible)
+        # Галерея — режим просмотра: под ней по карте не строят и не добывают;
+        # над хотбаром кнопка мыши выбирает слот, а не копает.
+        held = (not self.item_window.visible and not self.gallery_visible
+                and not self.hud.over_ui(pygame.mouse.get_pos()))
         self.sim.set_mining(held and bool(buttons[0]))
         self.sim.set_scanning(held and bool(buttons[2]))
 
@@ -104,88 +117,128 @@ class Game:
         wx, wy = self.camera.screen_to_world(mx, my)
         return int(math.floor(wx)), int(math.floor(wy))
 
-    def click_world(self, pos: tuple[int, int] | None = None) -> None:
-        """ЛКМ по миру: снести постройку или поставить выбранную (клавиши 1…8).
-
-        Цену постройки списывает симуляция: приложение только сообщает тайл.
-        """
-        self.sim.click_at(*self.tile_at_screen(pos))
+    def ghost_tile(self) -> tuple[int, int] | None:
+        """Тайл призрака постройки: только над картой и при закрытых окнах."""
+        if self.item_window.visible or self.gallery_visible:
+            return None
+        mouse = pygame.mouse.get_pos()
+        if self.hud.over_ui(mouse):
+            return None
+        return self.tile_at_screen(mouse)
 
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
+        elif event.type == pygame.TEXTINPUT:
+            if self.ui.text_input_active:
+                self.item_window.craft.search.insert(event.text)
         elif event.type == pygame.KEYDOWN:
             self._handle_keydown(event.key)
         elif event.type == pygame.MOUSEWHEEL:
-            self.camera.zoom_by(event.y)
+            self._handle_wheel(event)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 3):
             self._handle_click(event)
 
-    def _handle_click(self, event: pygame.event.Event) -> None:
-        """Клик мышью: сначала окна, потом мир.
+    def _handle_wheel(self, event: pygame.event.Event) -> None:
+        """Колесо — зум, Shift+колесо листает хотбар (вниз — следующий слот)."""
+        if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+            self.sim.scroll_hotbar(-int(event.y))
+        else:
+            self.camera.zoom_by(event.y)
 
-        ЛКМ по миру — постройка/снос (добыча держит кнопку), ПКМ по лаборатории
-        рядом — её слоты (M3.5). Скан тоже на ПКМ, но он держит кнопку и на
-        здание не смотрит, так что эти два действия не мешают друг другу.
+    def _handle_click(self, event: pygame.event.Event) -> None:
+        """Клик мышью: хотбар, потом окно, потом мир.
+
+        В мире по клику работает только ПКМ: окно здания или постановка
+        постройки из выбранного слота. Добыча, изучение и разбор держат ЛКМ —
+        их ведёт `poll_input`, а не событие клика.
         """
         pos = getattr(event, "pos", None)
         if pos is None:
             pos = pygame.mouse.get_pos()
         if self.gallery_visible:
             return
+        mods = pygame.key.get_mods()
+        shift = bool(mods & pygame.KMOD_SHIFT)
+        ctrl = bool(mods & pygame.KMOD_CTRL)
+        slot = self.hud.hotbar.hit(pos)
+        if slot is not None and event.button == 1 and not self.item_window.contains(
+                pos, self.sim):
+            self.ui.blur()
+            self.sim.apply(SelectHotbar(slot))
+            return
         if self.item_window.visible:
-            shift = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-            self.item_window.click(pos, event.button, self.sim, shift=shift)
-        elif event.button == 1:
-            if not self.book.click(pos, self.sim):
-                self.click_world(pos)
-        else:
-            self.open_container_at(pos)
+            self.item_window.click(pos, event.button, self.sim, shift=shift, ctrl=ctrl)
+            return
+        if self.hud.over_ui(pos):
+            return
+        if event.button == 3:
+            self.right_click_world(pos)
+
+    def right_click_world(self, pos: tuple[int, int]) -> None:
+        """ПКМ по карте (plan/10).
+
+        Здание с контейнерами — открыть его окно, что бы ни было в слоте. Иначе
+        постройка в выбранном слоте ставится на тайл (тратится один предмет).
+        Пустой слот или ресурс в слоте — ничего: скан идёт по удержанию ПКМ на
+        залежи, и его ведёт симуляция.
+        """
+        tile = self.tile_at_screen(pos)
+        building = self.sim.buildings.at(*tile)
+        if building is not None and building.containers:
+            self.open_container(building)
+            return
+        if self.sim.selected_building() is not None:
+            self.sim.apply(PlaceBuilding(self.sim.selected_slot, tile))
 
     def open_container_at(self, pos: tuple[int, int]) -> bool:
-        """ПКМ по зданию: открыть его контейнеры (склад, сборщик, бур, лаборатория)."""
+        """Окно контейнеров здания под экранной точкой (если оно там есть)."""
         building = self.sim.buildings.at(*self.tile_at_screen(pos))
         if building is None or not building.containers:
             return False
+        return self.open_container(building)
+
+    def open_container(self, building) -> bool:
+        """ПКМ по зданию: открыть его контейнеры (склад, сборщик, бур, лаборатория)."""
         if not self.sim.building_reachable(building):
             self.sim.toast("Слишком далеко до здания")
             return False
-        self.book.close()
         self.item_window.open_container(self.sim, building)
         return True
 
     def _handle_keydown(self, key: int) -> None:
+        if self.ui.text_input_active:
+            self._handle_text_key(key)
+            return
         if key == pygame.K_ESCAPE:
             # Esc закрывает окно, а не игру: окно поверх мира — первый шаг назад.
             if self.gallery_visible:
                 self.gallery_visible = False
             elif self.item_window.visible:
                 self.item_window.close(self.sim)
-            elif self.book.visible:
-                self.book.close()
             else:
                 self.running = False
         elif key == pygame.K_SPACE:
             self.paused = not self.paused
-        elif key in (pygame.K_i, pygame.K_TAB):
-            self.book.close()
-            self.item_window.toggle_drone(self.sim)
-        elif key == pygame.K_r:
-            self.item_window.close(self.sim)
-            self.book.toggle()
+        elif key == pygame.K_e:
+            # E — инвентарь с крафтом. Из окна здания E тоже закрывает: одна
+            # клавиша «окно предметов», как в Minecraft.
+            if self.item_window.visible:
+                self.item_window.close(self.sim)
+            elif not self.gallery_visible:
+                self.item_window.open_drone(self.sim)
         elif key == pygame.K_q:
             # Q — выбросить стак из-под курсора, как в Minecraft: иначе вещь
             # из забитого инвентаря некуда деть, кроме как в землю.
             if self.item_window.visible:
                 self.item_window.drop_under_cursor(pygame.mouse.get_pos(), self.sim)
-        elif key == pygame.K_t:
-            # T — повернуть конвейер под курсором (и только его: у остальных
-            # зданий стороны нет). Направление при постройке берётся «от дрона»,
-            # а T исправляет промах, не требуя сносить и ставить заново.
-            if not self.sim.rotate_at(*self.tile_at_screen(None)):
-                self.sim.toast("Поворачивать нечего")
-        elif key in BUILD_KEYS:
-            self.sim.select_build(BUILD_KEYS[key])
+        elif key == pygame.K_r:
+            # R — поворот на 90° по часовой: призрак, а без него — конвейер под
+            # курсором. Иначе ничего (plan/10).
+            if not self.item_window.visible and not self.gallery_visible:
+                self.sim.rotate_preview(*self.tile_at_screen(None))
+        elif key in HOTBAR_KEYS:
+            self.sim.apply(SelectHotbar(HOTBAR_KEYS[key]))
         elif key == pygame.K_F1:
             self.debug.toggle("f1")
         elif key == pygame.K_F2:
@@ -194,6 +247,14 @@ class Game:
             self.debug.toggle("f3")
         elif key == pygame.K_F4:
             self.gallery_visible = not self.gallery_visible
+
+    def _handle_text_key(self, key: int) -> None:
+        """Клавиши в поле поиска: Esc снимает фокус, второй Esc закроет окно."""
+        search = self.item_window.craft.search
+        if key == pygame.K_ESCAPE or key in TEXT_SUBMIT_KEYS:
+            search.blur()
+        elif key == pygame.K_BACKSPACE:
+            search.backspace()
 
     # -------------------------------------------------------- симуляция
     def advance(self, dt: float) -> int:
@@ -220,11 +281,17 @@ class Game:
     # --------------------------------------------------------- отрисовка
     def render(self, dt: float = config.TICK) -> None:
         # dt идёт и в рендер: от него зависят анимации (а не от частоты кадров).
+        # На паузе анимации стоят: картинка замирает вместе с симуляцией
+        # (лента, луч дрона, частицы), а не продолжает жить своей жизнью.
+        anim_dt = 0.0 if self.paused else dt
         self.renderer.draw_world(self.screen, self.sim, self.camera,
-                                 show_lit_layer=self.debug.show_layers, dt=dt)
-        self.hud.draw(self.screen, self.sim, self.camera, self.fps, self.paused)
-        self.book.draw(self.screen, self.sim)
+                                 show_lit_layer=self.debug.show_layers, dt=anim_dt,
+                                 ghost_tile=self.ghost_tile())
+        self.hud.draw(self.screen, self.sim, self.camera, self.fps, self.paused,
+                      window_open=self.item_window.visible)
         self.item_window.draw(self.screen, self.sim)
+        self.hud.draw_hotbar(self.screen, self.sim,
+                             tooltip=self.item_window.held is None)
         if self.gallery_visible:
             self.gallery.draw(self.screen, hint="F4 или Esc — закрыть")
         self.debug.draw(self.screen, self.sim, self.camera, self.renderer,

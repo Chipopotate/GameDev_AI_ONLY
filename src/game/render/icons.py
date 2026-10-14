@@ -93,6 +93,9 @@ class IconCache:
         кадре (спрайт из фабрики трогать нельзя: он общий с миром).
         """
         assert self.sprites is not None
+        if item.building is not None:
+            # Постройка в слоте выглядит ровно так, как встанет на тайл (plan/03).
+            return self.sprites.building(item.building, "on", size)
         if item.crafted:
             # Сделанное — деталь, а не камень: правило plan/09 §1 работает и в инвентаре.
             return self.sprites.chip(item.id, size, item.color)

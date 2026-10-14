@@ -11,7 +11,8 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from src.game import config  # noqa: E402
-from src.game.data.buildings import GENERATOR, building as building_def  # noqa: E402
+from src.game.data.buildings import (BUILD_ORDER, GENERATOR, LAMP,  # noqa: E402
+                                     building as building_def)
 from src.game.data.recipes import ROLES  # noqa: E402
 from src.game.data.resources import Prop  # noqa: E402
 from src.game.data.terrain import Terrain  # noqa: E402
@@ -26,15 +27,32 @@ STOCK_COUNT = 30
 
 
 def stock(sim: Simulation, count: int = STOCK_COUNT) -> Simulation:
-    """Выдаёт дрону по стаку каждого предмета роли — «экономика M4» для тестов.
+    """Выдаёт дрону запас — «экономика» для тестов.
 
-    С M4 здания стоят предметов ролей, а скан — энергии. Тесты, которые
-    проверяют стройку и логистику, а не саму экономику, берут этот запас:
-    тогда цена не мешает проверять то, ради чего тест написан.
+    По стаку каждого предмета роли (скан тратит энергию, сборщику нужны
+    материалы) и по стаку каждого **предмета-постройки**: здание ставится
+    только из предмета (plan/03). Тесты, которые проверяют стройку и
+    логистику, а не саму экономику, берут этот запас — тогда цена не мешает
+    проверять то, ради чего тест написан. Постройки ложатся в хотбар, роли — в
+    инвентарь (правило `Cargo`).
     """
     for role in ROLES:
         sim.inventory.add(role.id, count)
+    for kind in BUILD_ORDER:
+        give_building(sim, kind, config.BUILDING_STACK)
     return sim
+
+
+def give_building(sim: Simulation, kind: str, count: int = 1) -> None:
+    """Кладёт дрону предметы-постройки — как будто их скрафтили."""
+    assert sim.cargo.add(kind, count) == 0, f"не влез предмет постройки {kind}"
+
+
+def place(sim: Simulation, kind: str, x: int, y: int,
+          direction: tuple[int, int] | None = None):
+    """Выдаёт один предмет-постройку и ставит его на тайл через хотбар."""
+    give_building(sim, kind, 1)
+    return sim.build(kind, x, y, direction=direction)
 
 
 def slot_of(container, item_id: str) -> int:
@@ -74,7 +92,7 @@ def power_lamp(sim: Simulation, x: int, y: int, fuel: int = STOCK_COUNT):
     энергию (порядок внутри `Simulation._update_power`).
     """
     stock(sim)
-    lamp = sim.place_lamp(x, y)
+    lamp = sim.build(LAMP, x, y)
     assert lamp is not None, "лампа не встала: проверь место и запас материалов"
     power_grid(sim, x, y, fuel)
     for _ in range(2):

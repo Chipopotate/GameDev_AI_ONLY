@@ -33,17 +33,19 @@ from collections import deque
 from dataclasses import dataclass
 
 from src.game import config
-from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES, BUILD_ORDER,
+from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES,
                                      LAB, LAMP, PLACE_DEPOSIT, WORK_CRAFT,
                                      WORK_MOVE, building as building_def,
                                      unlocked_by)
 from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
 from src.game.data.resources import PROP_NAMES, Prop
 from src.game.sim.buildings import DIRECTIONS, Building, BuildingSystem, CraftResult
+from src.game.sim.commands import (Command, DismantleBuilding, PlaceBuilding,
+                                   SelectHotbar)
 from src.game.sim.drops import DropSystem
 from src.game.sim.light import Lamp, LightSystem
 from src.game.sim.power import PowerNode, PowerSystem
-from src.game.sim.research import Knowledge, plan_craft
+from src.game.sim.research import KnownItems, Knowledge, plan_craft
 from src.game.sim.resources import (Cargo, Hotbar, Inventory, Stack, give,
                                     transfer)
 from src.game.sim.run_gen import Relic, RunPlan, generate_run
@@ -52,9 +54,8 @@ from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_SCAN,
                                 ACTION_STUDY, Drone, DroneAction)
 from src.game.sim.world import Deposit, World
 
-#: Что можно построить. Порядок — порядок строк в данных.
+#: Лампа — особая постройка: живёт в `sim/light.py`, а не в `sim/buildings.py`.
 BUILD_LAMP = LAMP
-BUILDINGS = BUILD_ORDER
 
 #: Предмет роли «энергия» — топливо скана и генератора (plan/02, M4).
 ENERGY_ITEM = role_def("energy").id
@@ -86,10 +87,15 @@ class CraftOption:
 
     recipe_id: str
     name: str
+    #: id предмета-результата (по нему панель берёт значок).
     role: str
     outputs: int
+    #: Усилитель роли: тот же предмет, но выгоднее (plan/02). Игрок его изучил,
+    #: значит, знает, что это второй вариант.
+    amplified: bool
     #: ((имя свойства, нужно, есть известных), …)
     requires: tuple[tuple[str, int, int], ...]
+    #: Хватает ли того, что игрок **знает** о своих ресурсах (см. `KnownItems`).
     available: bool
 
 
@@ -197,6 +203,27 @@ class Simulation:
     def set_scanning(self, active: bool) -> None:
         """Зажата ли правая кнопка мыши (скан свойств)."""
         self.scan_active = active
+
+    def apply(self, command: Command):
+        """Выполняет команду интерфейса (`sim/commands.py`). Возвращает её результат.
+
+        Интерфейс ничего не решает сам: он только собирает команду из ввода и
+        отдаёт её сюда, а все проверки — внутри симуляции.
+        """
+        if isinstance(command, SelectHotbar):
+            return self.select_hotbar(command.index)
+        if isinstance(command, PlaceBuilding):
+            return self.place_building(command.slot, command.tile, command.rotation)
+        if isinstance(command, DismantleBuilding):
+            return self.dismantle_building(*command.tile)
+        raise TypeError(f"неизвестная команда: {command!r}")
+
+    def scroll_hotbar(self, step: int) -> int:
+        """Shift+колесо: соседний слот хотбара по кругу. Возвращает новый номер."""
+        size = self.hotbar.size
+        if size > 0 and step:
+            self.select_hotbar((self.selected_slot + step) % size)
+        return self.selected_slot
 
     def select_hotbar(self, index: int) -> bool:
         """Выбор слота панели быстрого доступа (клавиши 1…9, клик по слоту).
@@ -688,7 +715,9 @@ class Simulation:
         """
         if stack is None:
             return
-        rest = give(stack, *(containers or (self.inventory,)))
+        # По умолчанию — в хранилище дрона по общему правилу (`Cargo`):
+        # постройка ложится в хотбар, ресурс — в инвентарь.
+        rest = give(stack, *(containers or (self.cargo,)))
         if rest is not None:
             self.throw_stack(rest.item_id, rest.count)
 
@@ -788,53 +817,64 @@ class Simulation:
         return True
 
     # ---------------------------------------------------------------- крафт
-    def craft(self, recipe_id: str, times: int = 1) -> bool:
+    def craft(self, recipe_id: str, times: int | None = 1) -> bool:
         """Крафт по рецепту: тратит ресурсы со свойствами, даёт предмет.
 
         Одна и та же операция для рецептов ролей и для предметов-построек
         (plan/02): «свойство × количество» не знает, что получится на выходе.
         Руками крафт мгновенный (🔧 `HANDCRAFT_TIME`), а время рецепта
         относится к сборщику.
+
+        `times` — сколько раз подряд (клик — 1, Shift — 5), None — сколько
+        хватит материалов и места (Ctrl). Если вышло хоть раз, сообщение одно:
+        сколько сделано; почему не вышло — только когда не вышло ни разу.
         """
         if not self.knowledge.is_known(recipe_id):
             self.toast("Рецепт ещё не открыт")
             return False
-        if times < 1:
+        if times is not None and times < 1:
             return False
         if self.time - self._last_craft_time < config.HANDCRAFT_TIME:
             return False
         recipe = self.run.recipe(recipe_id)
+        # «Максимум» ограничен сверху запасом: каждый крафт тратит хотя бы
+        # одну единицу, поэтому больше раз, чем единиц в хранилище, не выйдет.
+        limit = times if times is not None else self.cargo.total_count() + 1
         made = 0
-        for _ in range(times):
-            if not self._craft_once(recipe):
+        reason: str | None = None
+        while made < limit:
+            reason = self._craft_once(recipe)
+            if reason is not None:
                 break
             made += 1
         if made == 0:
+            self.toast(reason or "Не хватает материалов")
             return False
         self._last_craft_time = self.time
         name = self.run.items[recipe.role].name
         self.toast(f"+{recipe.outputs * made} {name}")
         return True
 
-    def _craft_once(self, recipe) -> bool:
-        """Один крафт: проверяет материалы и место, потом меняет состояние."""
+    def _craft_once(self, recipe) -> str | None:
+        """Один крафт: проверяет материалы и место, потом меняет состояние.
+
+        None — получилось; иначе — почему нет (текст для игрока).
+        """
         plan = plan_craft(recipe, self.cargo, self.run.items)
         if plan is None:
-            self.toast("Не хватает материалов")
-            return False
+            return "Не хватает материалов"
         # Место проверяем на копии: материалы при крафте освобождают слоты,
         # поэтому «сейчас полно» ещё не значит «после крафта не влезет».
         after = self.cargo.copy()
         for item_id, count in plan.items():
             after.remove(item_id, count)
         if not after.can_accept(recipe.role, recipe.outputs):
-            self.toast("Нет места в инвентаре")
-            return False
+            return "Нет места в инвентаре"
         for item_id, count in plan.items():
             self.cargo.remove(item_id, count)
         self.cargo.add(recipe.role, recipe.outputs)
         self.crafted_total += recipe.outputs
-        return True
+        return None
 
     # ------------------------------------------------------- панель крафта
     def craft_options(self, query: str = "") -> tuple[CraftOption, ...]:
@@ -845,6 +885,7 @@ class Simulation:
         имени без учёта регистра, доступные рецепты идут первыми.
         """
         needle = query.strip().casefold()
+        known_items = KnownItems(self.run.items, self.knowledge)
         options: list[CraftOption] = []
         for recipe in self.run.recipes:
             if not self.knowledge.is_known(recipe.id):
@@ -852,11 +893,13 @@ class Simulation:
             name = self.run.items[recipe.role].name
             if needle and needle not in name.casefold():
                 continue
-            options.append(self._craft_option(recipe, name))
-        options.sort(key=lambda option: (not option.available, option.name))
+            options.append(self._craft_option(recipe, name, known_items))
+        # Усилитель идёт сразу за базовым рецептом той же роли: имя у них одно.
+        options.sort(key=lambda option: (not option.available, option.name,
+                                         option.amplified))
         return tuple(options)
 
-    def _craft_option(self, recipe, name: str) -> CraftOption:
+    def _craft_option(self, recipe, name: str, known_items: KnownItems) -> CraftOption:
         requires = tuple(
             (PROP_NAMES[prop], count, self._known_units_with(prop))
             for prop, count in recipe.requires)
@@ -865,8 +908,11 @@ class Simulation:
             name=name,
             role=recipe.role,
             outputs=recipe.outputs,
+            amplified=recipe.amplified,
             requires=requires,
-            available=plan_craft(recipe, self.cargo, self.run.items) is not None,
+            # По знанию, а не по настоящим свойствам: яркий рецепт не должен
+            # выдавать, что в рюкзаке есть ресурс с ещё не открытым свойством.
+            available=plan_craft(recipe, self.cargo, known_items) is not None,
         )
 
     def _known_units_with(self, prop: Prop) -> int:

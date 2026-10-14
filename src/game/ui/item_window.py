@@ -1,24 +1,27 @@
-"""Окно предметов: контейнеры дрона и зданий (M3.5, plan/03).
+"""Окно предметов: инвентарь с крафтом и контейнеры зданий (M3.5 → plan/02, plan/03).
 
 Одно окно на два случая:
-- **клавиша I или Tab** — сетка дрона (🔧 `DRONE_SLOTS` слотов);
+- **клавиша E** — слева сетка дрона (🔧 `DRONE_SLOTS` слотов) и под ней ряд
+  хотбара, справа панель крафта (`ui/craft_panel.py`) — как в Minecraft и
+  Factorio, без отдельной книги рецептов;
 - **ПКМ по зданию** — слева его контейнеры из данных (`data/buildings.py`),
-  справа сетка дрона: игрок перекладывает ресурсы и видит, что анализ идёт сам.
+  справа сетка дрона с хотбаром. Панели крафта здесь нет.
 
-Управление как в Minecraft:
+Управление как в Minecraft (M3.5), и оно одно для всех сеток окна, хотбара
+тоже:
 - ЛКМ — взять стак «в руку» или положить его (такой же предмет досыпается до
   лимита, другой — меняется местами);
 - ПКМ — взять половину стака; со стаком в руке — положить одну единицу;
 - Shift+ЛКМ — перекинуть стак в соседнюю сетку;
 - двойной ЛКМ — собрать в руку весь этот предмет из всех сеток окна;
 - Q — выбросить стак из-под курсора на землю;
-- «Сортировать» — разложить содержимое сетки по типу и количеству.
+- «Сортировать» — разложить сетку дрона по типу и количеству.
 
 Предмет «в руке» живёт, пока окно открыто. Закрывая окно, оно возвращает его
 в контейнеры, а что не влезло — бросает на землю: иначе предмет пропадал бы
 вместе с окном (plan/03). Окно только читает состояние симуляции; действия
-отдаёт ей (`sim.throw_from`, `sim.return_stack`, `transfer`), сама логика слотов
-живёт в `sim/resources.py`.
+отдаёт ей (`sim.throw_from`, `sim.return_stack`, `sim.craft`, `transfer`), сама
+логика слотов живёт в `sim/resources.py`.
 """
 
 from __future__ import annotations
@@ -35,18 +38,23 @@ from src.game.render.icons import IconCache
 from src.game.sim.buildings import (CRAFT_ITEMS, CRAFT_NONE, CRAFT_WORK,
                                     SLOT_ANALYZING, SLOT_EMPTY, SLOT_POWER,
                                     SLOT_STUDIED)
-from src.game.sim.resources import Container, Stack
+from src.game.sim.resources import Container, Stack, transfer
 from src.game.sim.simulation import Simulation
 from src.game.ui import widgets
+from src.game.ui.craft_panel import CraftPanel
 from src.game.ui.slot_grid import SlotGrid
+from src.game.ui.state import UiState
 
-MODE_DRONE = "drone"          # клавиша I/Tab: только сетка дрона
+MODE_DRONE = "drone"          # клавиша E: сетка дрона, хотбар и крафт
 MODE_CONTAINER = "container"  # ПКМ по зданию: его контейнеры и сетка дрона
 
-DRONE_COLS = 5                # сетка дрона: 5 в ряд (20 слотов = 4 строки)
+#: Сетка дрона: 10 в ряд (20 слотов = 2 строки), под ней ряд хотбара из 9 —
+#: та же раскладка, что у инвентаря Minecraft.
+DRONE_COLS = 10
 
 PAD = 12
-PANEL_GAP = 18
+PANEL_GAP = 18             # между колонками окна
+STACK_GAP = 8              # между сетками внутри колонки
 PANEL_PAD = 10
 PANEL_MIN_W = 176        # чтобы влезли строки состояния слотов вместе с полосой
 HEADER_H = 22            # строка с именем окна и подсказкой клавиш
@@ -57,11 +65,14 @@ STATUS_BAR_W = 40        # полоса анализа справа в стро�
 BUTTON_W = 108
 BUTTON_H = 22
 BUTTON_GAP = 6
-HINT_DRONE = "ЛКМ — взять/положить, ПКМ — половину, двойной ЛКМ — всё"
+HINT_DRONE = "ЛКМ — взять/положить · ПКМ — половину · Shift+ЛКМ — в хотбар и обратно · Q — выбросить"
 HINT_CONTAINER = "Shift+ЛКМ — переложить · ПКМ — половину/одну · Q — выбросить"
 SORT_LABEL = "Сортировать"
 RECIPE_LABEL = "Рецепт: {name}"
 NO_RECIPE_LABEL = "Выбрать рецепт"
+INVENTORY_TITLE = "Инвентарь дрона"
+HOTBAR_TITLE = "Хотбар (1–9)"
+CRAFT_TITLE = "Крафт"
 
 #: Что написать в строке состояния (значения — из `sim/buildings.py`).
 STATUS_TEXT = {
@@ -114,13 +125,18 @@ class Panel:
     sortable: bool = False
     action: str | None = None
     button: pygame.Rect | None = field(default=None)
+    #: Сетка дрона (инвентарь или хотбар), а не здания: по этому выбирается,
+    #: куда Shift+ЛКМ перекидывает стак.
+    drone: bool = False
 
 
 class ItemWindow:
-    """Окно с сетками слотов. Клавиша I или Tab, либо ПКМ по зданию."""
+    """Окно с сетками слотов. Клавиша E (с крафтом) или ПКМ по зданию."""
 
-    def __init__(self, icons: IconCache) -> None:
+    def __init__(self, icons: IconCache, ui: UiState | None = None) -> None:
         self.icons = icons
+        self.ui = ui if ui is not None else UiState()
+        self.craft = CraftPanel(icons, self.ui)
         self.mode: str | None = None
         self.building = None
         #: Стак «в руке»: предмет, который игрок несёт между слотами.
@@ -129,6 +145,7 @@ class ItemWindow:
         #: двойного клика. Своё время, а не событие pygame: окно работает и
         #: в тестах, где событий нет.
         self._last_click: tuple[int, int, int] | None = None
+        self._rect = pygame.Rect(0, 0, 0, 0)
 
     # ------------------------------------------------------------- открытие
     @property
@@ -139,7 +156,12 @@ class ItemWindow:
     def title(self) -> str:
         if self.mode == MODE_CONTAINER and self.building is not None:
             return building_def(self.building.kind).name
-        return "Инвентарь дрона"
+        return "Инвентарь и крафт"
+
+    @property
+    def has_craft(self) -> bool:
+        """Панель крафта — только в окне инвентаря (E), не в окне здания."""
+        return self.mode == MODE_DRONE
 
     def open_drone(self, sim: Simulation) -> None:
         self.close(sim)
@@ -159,37 +181,42 @@ class ItemWindow:
     def close(self, sim: Simulation) -> None:
         """Закрывает окно, возвращая предмет из руки в контейнеры."""
         self._release_held(sim)
+        self.craft.search.blur()
         self.mode = None
         self.building = None
         self._last_click = None
 
     def _release_held(self, sim: Simulation) -> None:
-        """Возвращает стак из руки: сначала дрону, потом зданию, иначе на землю."""
+        """Возвращает стак из руки: в здание, потом дрону, иначе на землю."""
         if self.held is None:
             return
         stack, self.held = self.held, None
         sim.return_stack(stack, *self._containers(sim))
 
-    def _containers(self, sim: Simulation) -> list[Container]:
-        """Все контейнеры, до которых окно дотягивается: здание и дрон."""
-        out: list[Container] = []
+    def _containers(self, sim: Simulation) -> list:
+        """Куда окно возвращает предмет: здание, потом дрон по правилу `Cargo`."""
+        out: list = []
         if self.building is not None:
             out.extend(c for c in self.building.containers.values() if c is not None)
-        out.append(sim.inventory)
+        out.append(sim.cargo)
         return out
 
     # -------------------------------------------------------------- раскладка
     def panels(self, sim: Simulation) -> list[Panel]:
-        """Сетки окна: у инвентаря одна, у здания — его контейнеры и дрон.
+        """Сетки окна: контейнеры здания (если это окно здания), затем дрон.
 
-        Контейнеры берутся из данных здания (`data/buildings.py`): у склада на
-        M4 их будет больше, и окно покажет их все без правок здесь.
+        У дрона две сетки: инвентарь и хотбар под ним. Перетаскивание между
+        ними — та же общая логика, что и между любыми другими сетками.
         """
-        drone = Panel("Инвентарь дрона", sim.inventory, grid_for(DRONE_COLS),
-                      sortable=True)
+        drone = [
+            Panel(INVENTORY_TITLE, sim.inventory, grid_for(DRONE_COLS), sortable=True,
+                  drone=True),
+            Panel(HOTBAR_TITLE, sim.hotbar, grid_for(sim.hotbar.size),
+                  active=sim.selected_slot, drone=True),
+        ]
         if self.mode != MODE_CONTAINER or self.building is None:
-            return [drone]
-        return self._building_panels(sim) + [drone]
+            return drone
+        return self._building_panels(sim) + drone
 
     def _building_panels(self, sim: Simulation) -> list[Panel]:
         """По панели на каждый контейнер здания, состояние — у рабочего.
@@ -231,6 +258,9 @@ class ItemWindow:
     def _button_label(self, panel: Panel) -> str:
         return SORT_LABEL if panel.sortable else (panel.action or "")
 
+    def _panel_w(self, panel: Panel) -> int:
+        return max(PANEL_MIN_W, panel.grid.size(panel.container.size)[0] + PANEL_PAD * 2)
+
     def _panel_h(self, panel: Panel) -> int:
         """Высота панели. Место под строки и кнопку резервируется всегда:
         иначе сетка прыгала бы в момент начала анализа (plan/07 §10)."""
@@ -242,35 +272,63 @@ class ItemWindow:
             h += BUTTON_H + BUTTON_GAP
         return h
 
+    def _columns(self, panels: list[Panel]) -> list[list[Panel]]:
+        """Колонки окна: здание слева, дрон (инвентарь над хотбаром) справа."""
+        building = [p for p in panels if not p.drone]
+        drone = [p for p in panels if p.drone]
+        return [building, drone] if building else [drone]
+
     def _layout(self, sim: Simulation) -> tuple[tuple[int, int, int, int], list[Panel]]:
         """Считает окно и сетки. Раскладка детерминирована — её же читают клики."""
         panels = self.panels(sim)
-        widths = [max(PANEL_MIN_W, p.grid.size(p.container.size)[0] + PANEL_PAD * 2)
-                  for p in panels]
-        inner_h = max(self._panel_h(p) for p in panels)
-        w = PAD * 2 + sum(widths) + PANEL_GAP * (len(panels) - 1)
+        columns = self._columns(panels)
+        widths = [max(self._panel_w(p) for p in col) for col in columns]
+        heights = [sum(self._panel_h(p) for p in col) + STACK_GAP * (len(col) - 1)
+                   for col in columns]
+        if self.has_craft:
+            craft_w, craft_h = self.craft.size(sim)
+            widths.append(craft_w)
+            heights.append(TITLE_H + craft_h)
+        inner_h = max(heights)
+        w = PAD * 2 + sum(widths) + PANEL_GAP * (len(widths) - 1)
         h = PAD * 2 + HEADER_H + inner_h + HINT_H
         x = config.WINDOW_W // 2 - w // 2
         y = config.WINDOW_H // 2 - h // 2
-        cx = x + PAD
         top = y + PAD + HEADER_H
-        for panel, pw in zip(panels, widths):
-            gw, gh = panel.grid.size(panel.container.size)
-            panel.content = (cx + PANEL_PAD, pw - PANEL_PAD * 2)
-            panel.origin = (cx + (pw - gw) // 2, top + TITLE_H)
-            below = top + TITLE_H + gh + 6
-            if panel.statuses:
-                below += STATUS_ROW * len(panel.statuses)
-            panel.button = None
-            if self._has_button(panel):
-                # Ширина кнопки — по надписи: «Рецепт: Энергия» длиннее слова
-                # «Сортировать», а обрезанная надпись в окне бесполезна.
-                bw = max(BUTTON_W, widgets.text_width(self._button_label(panel),
-                                                      config.UI_FONT_SIZE_SMALL) + 16)
-                bw = min(bw, pw - PANEL_PAD * 2)
-                panel.button = pygame.Rect(cx + (pw - bw) // 2, below, bw, BUTTON_H)
+        cx = x + PAD
+        for col, pw in zip(columns, widths):
+            cy = top
+            for panel in col:
+                self._place_panel(panel, cx, cy, pw)
+                cy += self._panel_h(panel) + STACK_GAP
             cx += pw + PANEL_GAP
+        if self.has_craft:
+            self.craft.place((cx, top + TITLE_H), sim)
+        self._rect = pygame.Rect(x, y, w, h)
         return (x, y, w, h), panels
+
+    def _place_panel(self, panel: Panel, cx: int, top: int, pw: int) -> None:
+        gw, gh = panel.grid.size(panel.container.size)
+        panel.content = (cx + PANEL_PAD, pw - PANEL_PAD * 2)
+        panel.origin = (cx + (pw - gw) // 2, top + TITLE_H)
+        below = top + TITLE_H + gh + 6
+        if panel.statuses:
+            below += STATUS_ROW * len(panel.statuses)
+        panel.button = None
+        if self._has_button(panel):
+            # Ширина кнопки — по надписи: «Рецепт: Энергия» длиннее слова
+            # «Сортировать», а обрезанная надпись в окне бесполезна.
+            bw = max(BUTTON_W, widgets.text_width(self._button_label(panel),
+                                                  config.UI_FONT_SIZE_SMALL) + 16)
+            bw = min(bw, pw - PANEL_PAD * 2)
+            panel.button = pygame.Rect(cx + (pw - bw) // 2, below, bw, BUTTON_H)
+
+    def contains(self, pos: tuple[int, int], sim: Simulation) -> bool:
+        """Попадает ли точка в окно (клики вне окна идут дальше — в хотбар)."""
+        if not self.visible:
+            return False
+        x, y, w, h = self._layout(sim)[0]
+        return pygame.Rect(x, y, w, h).collidepoint(pos)
 
     def _slot_at(self, pos: tuple[int, int],
                  sim: Simulation) -> tuple[int, int] | None:
@@ -305,6 +363,11 @@ class ItemWindow:
                             else None)
             self._draw_statuses(target, panel)
             self._draw_button(target, panel, mouse)
+        if self.has_craft:
+            ox, oy = self.craft.origin
+            widgets.draw_text(target, CRAFT_TITLE, (ox, oy - TITLE_H),
+                              color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
+            self.craft.draw(target, sim, mouse if self.held is None else (-1, -1))
 
         widgets.draw_text(target, self._footer_hint(), (x + PAD, y + h - HINT_H + 4),
                           color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
@@ -313,8 +376,8 @@ class ItemWindow:
 
     def _hint(self) -> str:
         if self.mode == MODE_DRONE:
-            return "I или Tab — закрыть"
-        return "I — инвентарь, Esc — закрыть"
+            return "E или Esc — закрыть"
+        return "Esc — закрыть"
 
     def _footer_hint(self) -> str:
         return HINT_DRONE if self.mode == MODE_DRONE else HINT_CONTAINER
@@ -409,7 +472,8 @@ class ItemWindow:
 
     # ------------------------------------------------------------------ ввод
     def click(self, pos: tuple[int, int], button: int, sim: Simulation,
-              shift: bool = False, when: int | None = None) -> bool:
+              shift: bool = False, when: int | None = None,
+              ctrl: bool = False) -> bool:
         """Клик по окну. True — если окно его поглотило (мимо мира).
 
         `when` — время клика в миллисекундах; по умолчанию берётся у pygame,
@@ -418,6 +482,13 @@ class ItemWindow:
         if not self.visible:
             return False
         panels = self._layout(sim)[1]
+        if self.has_craft and button == 1:
+            # Поле поиска само решает, взять ли фокус: клик мимо него снимает
+            # фокус (plan/10), клик по рецепту — крафт.
+            if self.craft.click(pos, sim, shift=shift, ctrl=ctrl, when=when):
+                return True
+        elif self.has_craft:
+            self.craft.search.blur()
         if button == 1 and self._click_button(pos, panels, sim):
             return True
         hit = self._slot_at(pos, sim)
@@ -495,7 +566,7 @@ class ItemWindow:
             return
         target = container.slot(slot)
         if target is not None and (target.item_id != self.held.item_id
-                                   or target.count >= container.stack_max):
+                                   or target.count >= container.max_for(target.item_id)):
             return
         container.put_slot(slot, Stack(self.held.item_id, 1))
         self.held.count -= 1
@@ -526,16 +597,23 @@ class ItemWindow:
 
     def _quick_move(self, panels: list[Panel], panel_i: int, slot: int,
                     sim: Simulation) -> None:
-        """Shift+ЛКМ: стак уезжает в соседнюю сетку (здание ↔ дрон).
+        """Shift+ЛКМ: стак уезжает в соседнюю сетку.
 
-        Соседняя — всегда дрон для сеток здания и первая сетка здания для
-        дрона: у здания на M4 контейнеров будет несколько, и «перекинуть в
-        дрон» должно оставаться однозначным.
+        - из сетки здания — дрону, по правилу `Cargo` (постройка в хотбар,
+          ресурс в инвентарь);
+        - из сетки дрона в окне здания — в первую сетку здания;
+        - в окне инвентаря — между инвентарём и хотбаром.
         """
-        if len(panels) < 2:
-            return                           # в окне инвентаря перекладывать некуда
-        target = panels[0] if panel_i == len(panels) - 1 else panels[-1]
-        if panels[panel_i].container.transfer_to(target.container, slot) == 0:
+        source = panels[panel_i]
+        building = [p for p in panels if not p.drone]
+        if not source.drone:
+            moved = transfer(source.container, sim.cargo, slot)
+        elif building:
+            moved = transfer(source.container, building[0].container, slot)
+        else:
+            other = sim.hotbar if source.container is sim.inventory else sim.inventory
+            moved = transfer(source.container, other, slot)
+        if moved == 0:
             sim.toast("Нет места")
 
     def drop_under_cursor(self, pos: tuple[int, int], sim: Simulation) -> bool:

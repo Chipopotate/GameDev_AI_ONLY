@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.game.data.recipes import Recipe
-from src.game.data.resources import ItemTable, Prop
+from src.game.data.resources import ItemDef, ItemTable, Prop
 from src.game.sim.resources import Inventory
 
 
@@ -148,6 +150,41 @@ def plan_craft(recipe: Recipe, inventory: Inventory,
         plan[item_id] = plan.get(item_id, 0) + 1
         for prop in covers:
             need[prop] -= 1
+
+
+class KnownItems:
+    """Таблица предметов «глазами игрока»: у ресурса только открытые свойства.
+
+    Нужна панели крафта (plan/02): «можно скрафтить сейчас» и «есть M» обязаны
+    считаться по тому, что игрок знает, — иначе яркий рецепт выдал бы, что у
+    какого-то ресурса в рюкзаке есть ещё не открытое свойство. Сам крафт этой
+    таблицей не пользуется: подбор материалов идёт по настоящим свойствам, как
+    и раньше.
+
+    Подставные `ItemDef` кэшируются на время жизни объекта: его создают на
+    один запрос панели, поэтому устаревшее знание в нём не задерживается.
+    """
+
+    def __init__(self, items: ItemTable, knowledge: Knowledge) -> None:
+        self._items = items
+        self._knowledge = knowledge
+        self._cache: dict[str, ItemDef] = {}
+
+    def get(self, item_id: str) -> ItemDef | None:
+        item = self._cache.get(item_id)
+        if item is None:
+            real = self._items.get(item_id)
+            if real is None:
+                return None
+            item = replace(real, props=self._knowledge.visible(item_id) & real.props)
+            self._cache[item_id] = item
+        return item
+
+    def __getitem__(self, item_id: str) -> ItemDef:
+        item = self.get(item_id)
+        if item is None:
+            raise KeyError(item_id)
+        return item
 
 
 def can_craft(recipe: Recipe, inventory: Inventory, items: ItemTable) -> bool:

@@ -5,46 +5,48 @@ from __future__ import annotations
 import pygame
 
 from src.game import config
-from src.game.data.buildings import BUILDING_TYPES, BUILD_ORDER
-from src.game.data.recipes import ROLES
-from src.game.data.resources import PROP_NAMES
+from src.game.data.buildings import building as building_def
 from src.game.render import theme
 from src.game.render.camera import Camera
 from src.game.render.icons import IconCache
 from src.game.sim.simulation import ENERGY_ITEM, Simulation
 from src.game.ui import widgets
+from src.game.ui.controls import hint_lines
+from src.game.ui.hotbar import HotbarBar
 
-#: Названия для строки HUD — из данных здания, чтобы новая строка таблицы
-#: появлялась в интерфейсе сама (plan/03: типы описываются данными).
-BUILD_NAMES = {kind: definition.name.lower() for kind, definition in BUILDING_TYPES.items()}
-
-#: Подсказка «какая клавиша что строит» — порядок из данных (`BUILD_ORDER`),
-#: по 🔧 четыре здания в строке: одной строкой она была бы шире экрана.
-BUILD_KEYS_HINT = tuple(
-    ", ".join(f"{i + 1} — {BUILD_NAMES[kind]}"
-              for i, kind in enumerate(BUILD_ORDER[start:start + 4], start=start))
-    for start in range(0, len(BUILD_ORDER), 4)
-)
-
-CONTROLS = (
-    "WASD — движение",
-    "ЛКМ (держать) — добывать / изучать",
-    "ПКМ (держать) — скан свойств (энергия)",
-    "ЛКМ (клик) — поставить/снять постройку",
-    "ПКМ по зданию — его контейнеры",
-    "T — повернуть конвейер под курсором",
-) + BUILD_KEYS_HINT + (
-    "I или Tab — инвентарь, R — рецепты",
-    "Пробел — пауза, колесо — зум",
-    "F2 — слой света, F3 — отладка",
-    "Esc — выход",
-)
+#: Подсказка управления — из единой таблицы (`ui/controls.py` = plan/10).
+CONTROLS = hint_lines()
 
 ROW_H = 26
+#: Таблица клавиш: ширина колонки текста, шаг строк, отступ продолжения строки
+#: и зазор до хотбара (пиксели).
+CONTROLS_W = 300
+CONTROLS_ROW = 16
+CONTROLS_INDENT = 14
+CONTROLS_GAP = 8
+#: Строка подсказки висит над хотбаром на столько пикселей (место под его подпись).
+PROMPT_ABOVE_HOTBAR = 62
 TOAST_TOP = 96             # ниже панели времени суток
 TIME_PANEL_W = 210
 
 _pause_overlays: dict[tuple[int, int], pygame.Surface] = {}
+
+
+def _wrap(text: str, width: int, size: int) -> list[str]:
+    """Переносит строку по словам так, чтобы каждая часть влезала в ширину."""
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        probe = f"{current} {word}" if current else word
+        if current and widgets.text_width(probe, size) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = probe
+    if current:
+        lines.append(current)
+    return lines
 
 
 def _pause_overlay(size: tuple[int, int]) -> pygame.Surface:
@@ -62,17 +64,36 @@ class Hud:
 
     def __init__(self, icons: IconCache) -> None:
         self.icons = icons
+        #: Панель быстрого доступа видна всегда — и поверх открытых окон.
+        self.hotbar = HotbarBar(icons)
+        self._controls_cache: list[tuple[str, int]] | None = None
 
     def draw(self, target: pygame.Surface, sim: Simulation, camera: Camera,
-             fps: float, paused: bool) -> None:
+             fps: float, paused: bool, window_open: bool = False) -> None:
         self._draw_status(target, sim, camera, fps)
         self._draw_time(target, sim)
         self._draw_inventory(target, sim)
-        self._draw_controls(target)
+        if not window_open:
+            # В окне свои подсказки, и таблица клавиш легла бы поверх него.
+            self._draw_controls(target)
         self._draw_toasts(target, sim)
-        self._draw_prompt(target, sim)
+        if not window_open:
+            self._draw_prompt(target, sim)
         if paused:
             self._draw_pause(target)
+
+    def draw_hotbar(self, target: pygame.Surface, sim: Simulation,
+                    tooltip: bool = True) -> None:
+        """Хотбар — последним слоем: он виден и поверх окна инвентаря."""
+        self.hotbar.draw(target, sim, pygame.mouse.get_pos(), tooltip=tooltip)
+
+    def over_ui(self, pos: tuple[int, int]) -> bool:
+        """Над интерактивной частью HUD (хотбаром) ли курсор.
+
+        Справочные панели (статус, время, подсказка клавиш) ввод не берут —
+        как и раньше: иначе подсказка управления занимала бы угол карты.
+        """
+        return self.hotbar.contains(pos)
 
     # --------------------------------------------------------- левый верх
     def _draw_status(self, target: pygame.Surface, sim: Simulation,
@@ -85,12 +106,13 @@ class Hud:
             f"Тайл: {sim.drone.tile()[0]}, {sim.drone.tile()[1]}",
             f"Зум: {camera.zoom:.1f}x",
             f"Добыто: {sim.mined_total}",
-            f"Стройка: {BUILD_NAMES.get(sim.selected_building, sim.selected_building)}",
+            f"Слот {sim.selected_slot + 1}: {self._slot_name(sim)}",
             # Энергия сети (M4): выработка/спрос. Если выработки меньше, часть
             # зданий стоит — это видно по числам без отдельной лампочки.
             f"Энергия: {supply:.0f}/{demand:.0f}",
             f"Свойств: {known}/{total}",
-            f"Рецептов: {sim.knowledge.known_count}/{len(ROLES) * 2}",
+            # Только сколько открыто: «из скольких» выдало бы число неоткрытого.
+            f"Рецептов: {sim.knowledge.known_count}",
         )
         w = 190
         h = len(lines) * 18 + 12
@@ -98,6 +120,13 @@ class Hud:
         for i, line in enumerate(lines):
             widgets.draw_text(target, line, (m + 10, m + 6 + i * 18),
                               size=config.UI_FONT_SIZE_SMALL)
+
+    @staticmethod
+    def _slot_name(sim: Simulation) -> str:
+        stack = sim.selected_stack()
+        if stack is None:
+            return "пусто"
+        return sim.run.items[stack.item_id].name.lower()
 
     # -------------------------------------------------------- верх по центру
     def _draw_time(self, target: pygame.Surface, sim: Simulation) -> None:
@@ -122,7 +151,7 @@ class Hud:
 
     # -------------------------------------------------------- левый низ
     def _draw_inventory(self, target: pygame.Surface, sim: Simulation) -> None:
-        """Сводка по инвентарю: что и сколько. Полная сетка слотов — по клавише I."""
+        """Сводка по инвентарю: что и сколько. Полная сетка слотов — по клавише E."""
         items = sim.inventory.items()
         inv = sim.inventory
         m = config.UI_MARGIN
@@ -133,7 +162,7 @@ class Hud:
         widgets.draw_text(target, f"Инвентарь {inv.used_slots}/{inv.size}",
                           (m + 10, y + 8), size=config.UI_FONT_SIZE)
         if not items:
-            widgets.draw_text(target, "пусто (I — слоты)", (m + 12, y + 36),
+            widgets.draw_text(target, "пусто (E — инвентарь)", (m + 12, y + 36),
                               color=theme.UI_TEXT_DIM, size=config.UI_FONT_SIZE_SMALL)
             return
         for i, (rid, count) in enumerate(items):
@@ -146,16 +175,35 @@ class Hud:
 
     # ------------------------------------------------------- правый низ
     def _draw_controls(self, target: pygame.Surface) -> None:
+        """Таблица клавиш у правого края, над хотбаром (не налезает на него).
+
+        Строки длинные, поэтому они переносятся по ширине 🔧 `CONTROLS_W`:
+        узкая колонка оставляет центр экрана карте.
+        """
         m = config.UI_MARGIN
         size = config.UI_FONT_SIZE_SMALL
-        w = max(widgets.text_width(t, size) for t in CONTROLS) + 24
-        h = len(CONTROLS) * 18 + 12
+        lines = self._control_lines()
+        w = CONTROLS_W + 24
+        h = len(lines) * CONTROLS_ROW + 12
         x = config.WINDOW_W - m - w
-        y = config.WINDOW_H - m - h
+        y = self.hotbar.rect.top - CONTROLS_GAP - h
         widgets.draw_panel(target, (x, y, w, h))
-        for i, line in enumerate(CONTROLS):
-            widgets.draw_text(target, line, (x + 12, y + 6 + i * 18),
+        for i, (line, indent) in enumerate(lines):
+            widgets.draw_text(target, line, (x + 12 + indent, y + 6 + i * CONTROLS_ROW),
                               color=theme.UI_TEXT_DIM, size=size)
+
+    def _control_lines(self) -> list[tuple[str, int]]:
+        """Строки таблицы, перенесённые по словам. Считаются один раз."""
+        if self._controls_cache is None:
+            size = config.UI_FONT_SIZE_SMALL
+            out: list[tuple[str, int]] = []
+            for line in CONTROLS:
+                indent = 0
+                for part in _wrap(line, CONTROLS_W - CONTROLS_INDENT, size):
+                    out.append((part, indent))
+                    indent = CONTROLS_INDENT
+            self._controls_cache = out
+        return self._controls_cache
 
     # ------------------------------------------------------- сообщения
     def _draw_toasts(self, target: pygame.Surface, sim: Simulation) -> None:
@@ -180,21 +228,34 @@ class Hud:
             return
         w = widgets.text_width(text, config.UI_FONT_SIZE) + 20
         x = config.WINDOW_W // 2 - w // 2
-        y = config.WINDOW_H - 96
+        # Над хотбаром, с местом под его подпись: они не должны налезать.
+        y = self.hotbar.rect.top - PROMPT_ABOVE_HOTBAR
         widgets.draw_panel(target, (x, y, w, 26))
         widgets.draw_text(target, text, (config.WINDOW_W // 2, y + 5),
                           color=color, size=config.UI_FONT_SIZE, align="center")
 
     @staticmethod
     def _prompt_for(sim: Simulation) -> tuple[str | None, tuple[int, int, int]]:
+        """Подсказка у курсора. Порядок — тот же, что у симуляции (plan/10)."""
         relic = sim.cursor_relic
         if relic is not None and not relic.studied:
             if sim.study_target is relic:
                 return "Изучаю реликвию", theme.STUDY_BAR_FG
             if not sim.in_study_range(relic):
                 return "Реликвия: слишком далеко", theme.UI_TEXT_DIM
-            return "ЛКМ — изучить реликвию", theme.STUDY_BAR_FG
+            return "ЛКМ (держать) — изучить реликвию", theme.STUDY_BAR_FG
+        own = Hud._own_building_prompt(sim)
+        if own is not None:
+            return own
+        kind = sim.selected_building()
         d = sim.cursor_deposit
+        if kind is not None and sim.cursor_tile is not None:
+            # С постройкой в руке ПКМ ставит, а не сканирует (plan/10).
+            name = building_def(kind).name
+            if sim.can_place(kind, *sim.cursor_tile):
+                return f"ПКМ — поставить: {name}", theme.OK
+            if d is None:
+                return f"{name}: здесь не поставить", theme.UI_TEXT_DIM
         if d is None:
             drop = sim.drops.at(*sim.cursor_tile) if sim.cursor_tile else None
             if drop is not None:
@@ -212,16 +273,38 @@ class Hud:
         if not sim.in_mine_range(d):
             return f"{name}: слишком далеко", theme.UI_TEXT_DIM
         text = f"ЛКМ — добывать {name}"
-        if sim.scan_target is d:
+        if kind is not None:
+            pass                               # ПКМ занята постройкой: скана нет
+        elif sim.scan_target is d:
             text += ", ПКМ — сканирую"
         elif sim.knowledge.unknown(d.resource_id):
             # С M4 скан стоит энергии: подсказка говорит об этом заранее, иначе
             # игрок просто держал бы ПКМ и ждал.
-            energy = sim.inventory.has(ENERGY_ITEM, config.SCAN_ENERGY_COST)
+            energy = sim.cargo.has(ENERGY_ITEM, config.SCAN_ENERGY_COST)
             text += ", ПКМ — скан свойств" if energy else ", ПКМ — скан (нужна энергия)"
         else:
             text += " (свойства открыты)"
         return text, theme.MINE_BAR_FG
+
+    @staticmethod
+    def _own_building_prompt(sim: Simulation) -> tuple[str, tuple[int, int, int]] | None:
+        """Своя постройка под курсором: разбор удержанием ЛКМ и окно по ПКМ."""
+        if sim.cursor_tile is None:
+            return None
+        building = sim.buildings.at(*sim.cursor_tile)
+        lamp = sim.light.lamp_at(*sim.cursor_tile)
+        target = building if building is not None else lamp
+        if target is None:
+            return None
+        name = building_def(building.kind if building is not None else "lamp").name
+        if sim.dismantle_target is target:
+            return f"Разбираю: {name}", theme.DISMANTLE_RING
+        if sim.dismantle_candidate() is None:
+            return f"{name}: слишком далеко", theme.UI_TEXT_DIM
+        text = f"{name}: ЛКМ (держать) — разобрать"
+        if building is not None and building.containers:
+            text += ", ПКМ — контейнеры"
+        return text, theme.UI_TEXT
 
     # ---------------------------------------------------------- пауза
     def _draw_pause(self, target: pygame.Surface) -> None:

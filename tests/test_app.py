@@ -19,7 +19,7 @@ from src.game.sim.commands import SelectHotbar
 from src.game.sim.resources import Stack, give
 from src.game.sim.simulation import ENERGY_ITEM
 from src.game.ui import widgets
-from src.game.ui.hud import CONTROLS_GAP, PROMPT_ABOVE_HOTBAR
+from src.game.ui.hud import PROMPT_ABOVE_HOTBAR
 from src.game.ui.item_window import MODE_CONTAINER, MODE_DRONE
 from tests.conftest import (SEED, give_building, place, power_grid, slot_of,
                             stock)
@@ -824,8 +824,6 @@ def test_hud_panels_take_the_cursor_after_a_frame(game, monkeypatch):
         "статус": (m + 5, m + 5),
         "время": (config.WINDOW_W // 2, m + 5),
         "сводка инвентаря": (m + 5, config.WINDOW_H - m - 5),
-        "таблица клавиш": (config.WINDOW_W - m - 5,
-                           hud.hotbar.rect.top - CONTROLS_GAP - 5),
     }
     for name, pos in panels.items():
         assert hud.over_ui(pos), name

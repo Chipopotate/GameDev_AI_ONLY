@@ -105,8 +105,48 @@ class World:
         #    стартовой зоне — иначе до обвала гор (M8) его было бы не достать,
         #    а «стратегическое решение» превратилось бы в картинку.
         cls._place_rare(deposits, deposit_id, terrain, rng, (sx, sy, sw, sh), items)
+        # 7. Гарантия топлива: горючий ресурс — рядом со стартом (см. run_gen).
+        cls._bring_fuel_near(deposits, deposit_id, terrain, items, (sx, sy, sw, sh))
 
         return cls(seed, terrain, deposit_id, deposits, (sx, sy, sw, sh), items)
+
+    @classmethod
+    def _bring_fuel_near(cls, deposits: list[Deposit], deposit_id: np.ndarray,
+                         terrain: np.ndarray, items: ItemTable,
+                         rect: tuple[int, int, int, int]) -> None:
+        """Ближайшую залежь горючего ресурса переносит к старту, если она далеко.
+
+        Переносится существующая залежь (а не добавляется новая): число залежей
+        каждого ресурса остаётся тем, что задано 🔧 в конфиге. Тайл — свободная
+        земля в кольце от `SPAWN_CLEAR_RADIUS + 1` до 🔧 `FUEL_NEAR_SPAWN`,
+        выбор детерминирован (ближайший по кругу, затем y, x).
+        """
+        from src.game.sim.run_gen import fuel_resource_id
+        fuel = fuel_resource_id(items)
+        if fuel is None:
+            return
+        sx, sy, sw, sh = rect
+        cx, cy = sx + sw // 2, sy + sh // 2
+        mine = [d for d in deposits if d.resource_id == fuel]
+        if not mine:
+            return
+        nearest = min(mine, key=lambda d: (d.x - cx) ** 2 + (d.y - cy) ** 2)
+        if max(abs(nearest.x - cx), abs(nearest.y - cy)) <= config.FUEL_NEAR_SPAWN:
+            return
+        near = config.SPAWN_CLEAR_RADIUS + 1
+        for radius in range(near, config.FUEL_NEAR_SPAWN + 1):
+            ring = [(cx + dx, cy + dy) for dy in range(-radius, radius + 1)
+                    for dx in range(-radius, radius + 1)
+                    if max(abs(dx), abs(dy)) == radius]
+            for x, y in sorted(ring, key=lambda t: (t[1], t[0])):
+                if not (0 <= x < terrain.shape[1] and 0 <= y < terrain.shape[0]):
+                    continue
+                if terrain[y, x] != int(Terrain.GROUND) or deposit_id[y, x] != -1:
+                    continue
+                deposit_id[nearest.y, nearest.x] = -1
+                nearest.x, nearest.y = x, y
+                deposit_id[y, x] = nearest.id
+                return
 
     @staticmethod
     def _start_rect() -> tuple[int, int, int, int]:

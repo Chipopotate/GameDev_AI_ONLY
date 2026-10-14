@@ -11,42 +11,15 @@ from src.game.render.camera import Camera
 from src.game.render.icons import IconCache
 from src.game.sim.simulation import ENERGY_ITEM, Simulation
 from src.game.ui import widgets
-from src.game.ui.controls import hint_lines
 from src.game.ui.hotbar import HotbarBar
 
-#: Подсказка управления — из единой таблицы (`ui/controls.py` = plan/10).
-CONTROLS = hint_lines()
-
 ROW_H = 26
-#: Таблица клавиш: ширина колонки текста, шаг строк, отступ продолжения строки
-#: и зазор до хотбара (пиксели).
-CONTROLS_W = 300
-CONTROLS_ROW = 16
-CONTROLS_INDENT = 14
-CONTROLS_GAP = 8
 #: Строка подсказки висит над хотбаром на столько пикселей (место под его подпись).
 PROMPT_ABOVE_HOTBAR = 62
 TOAST_TOP = 96             # ниже панели времени суток
 TIME_PANEL_W = 210
 
 _pause_overlays: dict[tuple[int, int], pygame.Surface] = {}
-
-
-def _wrap(text: str, width: int, size: int) -> list[str]:
-    """Переносит строку по словам так, чтобы каждая часть влезала в ширину."""
-    words = text.split(" ")
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        probe = f"{current} {word}" if current else word
-        if current and widgets.text_width(probe, size) > width:
-            lines.append(current)
-            current = word
-        else:
-            current = probe
-    if current:
-        lines.append(current)
-    return lines
 
 
 def _fit(text: str, width: int, size: int) -> str:
@@ -75,9 +48,6 @@ class Hud:
         self.icons = icons
         #: Панель быстрого доступа видна всегда — и поверх открытых окон.
         self.hotbar = HotbarBar(icons)
-        self._controls_cache: list[tuple[str, int]] | None = None
-        #: Таблица клавиш статична — рисуется один раз в свою поверхность.
-        self._controls_surface: pygame.Surface | None = None
         #: Панели, нарисованные в последнем кадре: над ними мир не получает ни
         #: кликов, ни призрака (plan/10: «курсор над картой, не над UI»).
         self._panels: list[pygame.Rect] = []
@@ -89,9 +59,6 @@ class Hud:
         self._draw_status(target, sim, camera, fps)
         self._draw_time(target, sim)
         self._draw_inventory(target, sim)
-        if not window_open:
-            # В окне свои подсказки, и таблица клавиш легла бы поверх него.
-            self._draw_controls(target)
         self._draw_toasts(target, sim)
         if not window_open:
             self._draw_prompt(target, sim, selected)
@@ -224,52 +191,6 @@ class Hud:
                               (m + 40, ry + 4), size=config.UI_FONT_SIZE)
             widgets.draw_text(target, str(count), (m + w - 12, ry + 4), align="right",
                               color=theme.OK, size=config.UI_FONT_SIZE)
-
-    # ------------------------------------------------------- правый низ
-    def _draw_controls(self, target: pygame.Surface) -> None:
-        """Таблица клавиш у правого края, над хотбаром (не налезает на него).
-
-        Строки длинные, поэтому они переносятся по ширине 🔧 `CONTROLS_W`:
-        узкая колонка оставляет центр экрана карте.
-        """
-        surf = self._controls_panel()
-        w, h = surf.get_size()
-        x = config.WINDOW_W - config.UI_MARGIN - w
-        y = self.hotbar.rect.top - CONTROLS_GAP - h
-        target.blit(surf, (x, y))
-        self._panels.append(pygame.Rect(x, y, w, h))
-
-    def _controls_panel(self) -> pygame.Surface:
-        """Таблица клавиш целиком — одна поверхность на всю игру.
-
-        Таблица не меняется, а это ~27 строк текста: рендерить их каждый кадр
-        значило бы создавать столько же поверхностей (CLAUDE.md, «кэши»).
-        """
-        if self._controls_surface is None:
-            size = config.UI_FONT_SIZE_SMALL
-            lines = self._control_lines()
-            w = CONTROLS_W + 24
-            h = len(lines) * CONTROLS_ROW + 12
-            surf = pygame.Surface((w, h), pygame.SRCALPHA)
-            widgets.draw_panel(surf, (0, 0, w, h))
-            for i, (line, indent) in enumerate(lines):
-                widgets.draw_text(surf, line, (12 + indent, 6 + i * CONTROLS_ROW),
-                                  color=theme.UI_TEXT_DIM, size=size)
-            self._controls_surface = surf
-        return self._controls_surface
-
-    def _control_lines(self) -> list[tuple[str, int]]:
-        """Строки таблицы, перенесённые по словам. Считаются один раз."""
-        if self._controls_cache is None:
-            size = config.UI_FONT_SIZE_SMALL
-            out: list[tuple[str, int]] = []
-            for line in CONTROLS:
-                indent = 0
-                for part in _wrap(line, CONTROLS_W - CONTROLS_INDENT, size):
-                    out.append((part, indent))
-                    indent = CONTROLS_INDENT
-            self._controls_cache = out
-        return self._controls_cache
 
     # ------------------------------------------------------- сообщения
     def _draw_toasts(self, target: pygame.Surface, sim: Simulation) -> None:

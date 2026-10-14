@@ -146,11 +146,10 @@ def test_controls_cover_the_new_keys_only():
 
 def test_hint_lines_are_built_from_the_table():
     assert hint_lines() == tuple(f"{k} — {a}" for k, a in CONTROLS)
-    assert hud.CONTROLS == hint_lines(), "HUD берёт подсказку из ui/controls.py"
 
 
-def test_hud_draws_the_controls_table(game, monkeypatch):
-    """HUD рисует ровно строки таблицы (с переносом по словам); с окном — прячет."""
+def test_help_window_draws_the_controls_table(game, monkeypatch):
+    """Таблица управления — в окне «Помощь» меню паузы, а не в HUD (просьба автора)."""
     drawn: list[str] = []
     original = widgets.draw_text
 
@@ -160,17 +159,15 @@ def test_hud_draws_the_controls_table(game, monkeypatch):
 
     monkeypatch.setattr(widgets, "draw_text", record)
     game.hud.draw(game.screen, game.sim, game.camera, 60.0)
-    parts = [line for line, _indent in game.hud._control_lines()]
-    assert " ".join(parts) == " ".join(hint_lines()), "перенос не теряет слов"
-    start = drawn.index(parts[0])
-    assert drawn[start:start + len(parts)] == parts, "таблица нарисована целиком"
-
+    keys = {key for key, _action in CONTROLS}
+    assert not keys & set(drawn) - {"E", "R"}, "в HUD таблицы больше нет"
     drawn.clear()
-    game.hud.draw(game.screen, game.sim, game.camera, 60.0, window_open=True)
-    assert not set(parts) & set(drawn), "при открытом окне таблица скрыта"
+    game.menu.visible = True
+    game.menu.help = True
+    game.menu.draw(game.screen, (0, 0))
+    for key, action in CONTROLS:
+        assert key in drawn and action in drawn, key
 
-
-# ------------------------------------------------------- старых клавиш нет
 def test_i_tab_t_do_nothing(game, monkeypatch):
     """I, Tab, T не открывают окно, не закрывают его и не крутят конвейер."""
     tx, ty = next_to_drone(game)
@@ -466,12 +463,14 @@ def test_inventory_summary_cuts_long_item_names(game, monkeypatch):
 
 
 def test_controls_table_is_rendered_once(game, monkeypatch):
-    """Таблица клавиш статична: её строки рендерятся в кэш один раз, не каждый кадр."""
+    """Таблица в «Помощи» статична: строки рендерятся в кэш один раз, не каждый кадр."""
+    game.menu.visible = True
+    game.menu.help = True
     drawn = record_text(monkeypatch)
-    game.hud.draw(game.screen, game.sim, game.camera, 60.0)
-    parts = {line for line, _indent in game.hud._control_lines()}
-    assert parts <= set(drawn), "в первом кадре таблица нарисована"
+    game.menu.draw(game.screen, (0, 0))
+    actions = {action for _key, action in CONTROLS}
+    assert actions <= set(drawn), "в первом кадре таблица нарисована"
     drawn.clear()
     for _ in range(3):
-        game.hud.draw(game.screen, game.sim, game.camera, 60.0)
-    assert not parts & set(drawn), "строки таблицы рендерятся заново каждый кадр"
+        game.menu.draw(game.screen, (0, 0))
+    assert not actions & set(drawn), "строки таблицы рендерятся заново каждый кадр"

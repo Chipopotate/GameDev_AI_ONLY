@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from src.game import config
 from src.game.data.buildings import (BUILDING_ITEMS, BUILDING_RECIPES,
@@ -214,6 +214,7 @@ def _generate_items(rng: random.Random) -> ItemTable:
     rare = make(count, rare_props, True)
 
     _ensure_sources(items, rng)
+    _ensure_fuel_hint(items)
 
     table = ItemTable(tuple(items) + (rare,) + CRAFTED_ITEMS + BUILDING_ITEMS)
     if not table.rare_id or len(table.natural) != count + 1:
@@ -276,6 +277,30 @@ def _patch_prop(items: list[ItemDef], prop: Prop, rng: random.Random) -> None:
             if sources > 1:
                 items[index] = with_prop_replaced(item, old, prop)
                 return
+
+
+def _ensure_fuel_hint(items: list[ItemDef]) -> None:
+    """Гарантия топлива: у одного обычного ресурса «горючий» виден сразу.
+
+    При подборе игрок видит одно случайное свойство (plan/02). Если у всех
+    горючих ресурсов первым показывалось другое, игрок мог так и не узнать,
+    из чего топить генератор. Поэтому подсказкой одного горючего ресурса
+    становится 🔥 — берём самый «узкий» (с меньшим числом свойств). Его же залежь
+    карта кладёт рядом со стартом (`World.generate`, 🔧 `FUEL_NEAR_SPAWN`).
+    """
+    if any(item.hint == Prop.FLAMMABLE for item in items):
+        return
+    burning = [i for i, item in enumerate(items) if Prop.FLAMMABLE in item.props]
+    if not burning:
+        return                      # `_ensure_sources` такого не допускает
+    index = min(burning, key=lambda i: (len(items[i].props), items[i].id))
+    items[index] = replace(items[index], hint=Prop.FLAMMABLE)
+
+
+def fuel_resource_id(items: ItemTable) -> str | None:
+    """Обычный ресурс, у которого «горючий» виден с первого подбора (гарантия топлива)."""
+    return next((i.id for i in items.natural
+                 if not i.rare and i.hint == Prop.FLAMMABLE), None)
 
 
 def _generate_relics(rng: random.Random) -> list[Relic]:

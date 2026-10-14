@@ -38,7 +38,7 @@ from src.game.data.buildings import (BUILDING_START, BUILDING_TYPES,
                                      WORK_MOVE, building as building_def,
                                      unlocked_by)
 from src.game.data.recipes import ROLE_IDS, ROLES, role as role_def
-from src.game.data.enemies import SHADOW, WALKER, enemy_type
+from src.game.data.enemies import ARTILLERY, MOSQUITO, SHADOW, WALKER, enemy_type
 from src.game.data.resources import PROP_NAMES, Prop
 from src.game.sim.buildings import DIRECTIONS, Building, BuildingSystem, CraftResult
 from src.game.sim.commands import (Command, DismantleBuilding, PlaceBuilding,
@@ -52,8 +52,8 @@ from src.game.sim.resources import (Cargo, Hotbar, Inventory, Stack, give,
                                     transfer)
 from src.game.sim.run_gen import Relic, RunPlan, generate_run
 from src.game.sim.time_cycle import EVENT_DAWN, EVENT_DUSK, TimeCycle
-from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_SCAN,
-                                ACTION_STUDY, Drone, DroneAction)
+from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_REPAIR,
+                                ACTION_SCAN, ACTION_STUDY, Drone, DroneAction)
 from src.game.sim.world import Deposit, World
 
 #: Лампа — особая постройка: живёт в `sim/light.py`, а не в `sim/buildings.py`.
@@ -182,6 +182,8 @@ class Simulation:
         self.study_progress = 0.0
         self.dismantle_target: Building | Lamp | None = None
         self.dismantle_progress = 0.0
+        #: Что дрон чинит прямо сейчас (M6): удержание ЛКМ по повреждённой постройке.
+        self.repair_target: Building | Lamp | None = None
         self.crafted_total = 0
         self._last_craft_time = -1e9
         # О чём уже сказали «инвентарь полон»: иначе сообщение висело бы на
@@ -308,6 +310,15 @@ class Simulation:
                 count = config.WAVE_WALKERS_BASE + config.WAVE_WALKERS_PER_DAY * (day - 1)
                 made = self.enemies.spawn_dark(self, WALKER, count)
                 self.toast(f"Ночь {day}: идут {enemy_type(WALKER).name.lower()}и ×{made}")
+                # M6 (plan/05 «Когда что появляется»): москиты стаей с 3-го дня,
+                # артиллерия — с 5-го.
+                if day >= config.MOSQUITO_FROM_DAY:
+                    group = self.enemies.rng.randint(*config.MOSQUITO_GROUP)
+                    if self.enemies.spawn_dark(self, MOSQUITO, group):
+                        self.toast(f"Москиты ×{group}: берегите конвейеры и провода")
+                if day >= config.ARTILLERY_FROM_DAY:
+                    if self.enemies.spawn_dark(self, ARTILLERY, config.ARTILLERY_PER_NIGHT):
+                        self.toast("Артиллерия: бьёт издалека по дорогим постройкам")
                 self._shadow_timer = 0.0
             elif event == EVENT_DAWN:
                 # Тени живут только в темноте: рассвет их растворяет (plan/05).
@@ -370,6 +381,7 @@ class Simulation:
             self._reset_mining()
             self._reset_study()
             self._reset_dismantle()
+            self._reset_repair()
             return
         relic = self.cursor_relic
         # Реликвия важнее: она не может стоять на залежи, так что выбор
@@ -381,14 +393,39 @@ class Simulation:
             return
         # Своя постройка важнее залежи: бур стоит **на** залежи, и «добыть
         # сквозь бур» — это точно не то, чего хотел игрок.
-        if self.dismantle_candidate() is not None:
+        target = self.dismantle_candidate()
+        if target is not None:
             self._reset_mining()
             self._reset_study()
-            self._update_dismantle(dt)
+            # Повреждённую постройку то же удержание ЛКМ сначала чинит (M6). Пока
+            # кнопку не отпустили, починка не превращается в разбор: иначе,
+            # дочинив здание, игрок тут же разобрал бы его.
+            if self.repair_target is not None or target.hp < self._max_hp(target):
+                self._reset_dismantle()
+                self._update_repair(dt, target)
+            else:
+                self._update_dismantle(dt)
             return
         self._reset_study()
         self._reset_dismantle()
+        self._reset_repair()
         self._update_mining(dt)
+
+    # ------------------------------------------------------- ремонт (M6)
+    @staticmethod
+    def _max_hp(target: Building | Lamp) -> float:
+        kind = target.kind if isinstance(target, Building) else BUILD_LAMP
+        return float(building_def(kind).hp)
+
+    def _update_repair(self, dt: float, target: Building | Lamp) -> None:
+        """Ремонт дроном: 🔧 `REPAIR_RATE` hp/с, пока держат ЛКМ на постройке."""
+        if self.repair_target is not None and self.repair_target is not target:
+            self._reset_repair()
+        self.repair_target = target
+        target.hp = min(self._max_hp(target), target.hp + config.REPAIR_RATE * dt)
+
+    def _reset_repair(self) -> None:
+        self.repair_target = None
 
     def _update_mining(self, dt: float) -> None:
         target = self.cursor_deposit
@@ -535,7 +572,12 @@ class Simulation:
         Луч лазера рисуется ровно тогда, когда здесь не None, поэтому таблица
         «действие → цвет» живёт в `render/theme.py`, а не размазана по рендеру.
         """
-        if self.study_target is not None:
+        if self.repair_target is not None:
+            target = self.repair_target
+            self.drone.action = DroneAction(
+                ACTION_REPAIR, (target.x + 0.5, target.y + 0.5),
+                target.hp / max(1.0, self._max_hp(target)))
+        elif self.study_target is not None:
             relic = self.study_target
             self.drone.action = DroneAction(ACTION_STUDY,
                                             (relic.x + 0.5, relic.y + 0.5),

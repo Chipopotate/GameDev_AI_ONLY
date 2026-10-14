@@ -71,8 +71,13 @@ def test_space_toggles_pause(game):
     assert not game.paused
 
 
-def test_escape_stops_game(game):
+def test_escape_opens_the_pause_menu_and_quit_is_a_button(game):
+    """Esc игру не закрывает: открывает меню паузы, выход — кнопкой «Выйти»."""
     game.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
+    assert game.running and game.menu.visible
+    quit_rect = game.menu.buttons()[-1][2]
+    game.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                         pos=quit_rect.center))
     assert not game.running
 
 
@@ -541,7 +546,7 @@ def test_escape_closes_the_inventory_before_quitting(game):
     key(game, pygame.K_ESCAPE)
     assert not game.item_window.visible and game.running
     key(game, pygame.K_ESCAPE)
-    assert not game.running
+    assert game.running and game.menu.visible, "второй Esc — меню паузы, не выход"
 
 
 def test_space_pauses_with_the_window_open(game):

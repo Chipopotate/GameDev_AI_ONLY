@@ -32,7 +32,8 @@ from src.game import config
 from src.game.data.buildings import (ASSEMBLER, CONVEYOR, DRILL, GENERATOR, LAB,
                                      STORAGE, TURRET, building as building_def)
 from src.game.data.enemies import enemy_type
-from src.game.sim.enemies import AMMO_ITEM, SHOT_DRONE, SHOT_ENEMY, SHOT_TURRET
+from src.game.sim.enemies import (AMMO_ITEM, SHOT_ARTILLERY, SHOT_DRONE, SHOT_ENEMY,
+                                  SHOT_TURRET)
 from src.game.data.relics import relic_def
 from src.game.data.terrain import Terrain
 from src.game.render import quality, theme
@@ -861,16 +862,24 @@ class Renderer:
             if quality.glow_enabled():
                 glow = self.sprites.factory.halo(eye, theme.ENEMY_EYE, 0.0, 0.8)
                 self.sprites.factory.blit_add(target, glow, (sx, sy))
-            hp_max = enemy_type(enemy.kind).hp
+            etype = enemy_type(enemy.kind)
+            if enemy.siege is not None:
+                # Артиллерия на позиции: кольцо дальности пульсирует, пока она
+                # разворачивается, и горит ровно, когда уже стреляет (plan/09 §8).
+                width = 2 if enemy.deployed else 1
+                pygame.draw.circle(target, theme.ARTILLERY_RING, (int(sx), int(sy)),
+                                   int(etype.attack_range * scale), width)
+            hp_max = etype.hp
             if enemy.hp < hp_max:
                 self._hp_bar(target, sx, sy - scale * 0.55, scale, enemy.hp / hp_max)
         colors = {SHOT_TURRET: theme.SHOT_TURRET, SHOT_DRONE: theme.SHOT_DRONE,
-                  SHOT_ENEMY: theme.SHOT_ENEMY}
+                  SHOT_ENEMY: theme.SHOT_ENEMY, SHOT_ARTILLERY: theme.ARTILLERY_RING}
         for shot in sim.enemies.shots:
             a = camera.world_to_screen(shot.x0, shot.y0)
             b = camera.world_to_screen(shot.x1, shot.y1)
             pygame.draw.line(target, colors.get(shot.source, theme.UI_TEXT), a, b,
-                             2 if shot.source != SHOT_ENEMY else 1)
+                             1 if shot.source == SHOT_ENEMY else
+                             3 if shot.source == SHOT_ARTILLERY else 2)
         for building in sim.buildings.buildings:
             hp_max = building_def(building.kind).hp
             if building.hp < hp_max and x0 <= building.x <= x1 and y0 <= building.y <= y1:

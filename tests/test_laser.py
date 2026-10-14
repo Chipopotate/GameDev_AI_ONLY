@@ -23,11 +23,11 @@ from src.game.render.effects.laser import HOT_ACTIONS, LaserBeam
 from src.game.render.renderer import Renderer
 from src.game.render.sprites.factory import SpriteFactory
 from src.game.sim.simulation import Simulation
-from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_SCAN,
-                                ACTION_STUDY, Drone, DroneAction)
+from src.game.sim.units import (ACTION_DISMANTLE, ACTION_MINE, ACTION_REPAIR,
+                                ACTION_SCAN, ACTION_STUDY, Drone, DroneAction)
 from tests.conftest import SEED
 
-ACTIONS = (ACTION_MINE, ACTION_DISMANTLE, ACTION_STUDY, ACTION_SCAN)
+ACTIONS = (ACTION_MINE, ACTION_DISMANTLE, ACTION_STUDY, ACTION_SCAN, ACTION_REPAIR)
 RED_ACTIONS = (ACTION_MINE, ACTION_DISMANTLE)
 BLUE_ACTIONS = (ACTION_STUDY, ACTION_SCAN)
 

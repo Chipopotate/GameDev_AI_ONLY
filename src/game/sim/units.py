@@ -14,6 +14,7 @@ ACTION_MINE = "mine"            # добыча залежи (ЛКМ зажата
 ACTION_DISMANTLE = "dismantle"  # разбор своей постройки (ЛКМ зажата)
 ACTION_STUDY = "study"          # изучение реликвии (ЛКМ зажата)
 ACTION_SCAN = "scan"            # скан свойств залежи (ПКМ зажата)
+ACTION_REPAIR = "repair"        # ремонт своей постройки (ЛКМ зажата, M6)
 
 
 @dataclass(frozen=True)

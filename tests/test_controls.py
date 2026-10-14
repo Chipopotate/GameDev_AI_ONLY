@@ -291,7 +291,7 @@ def test_escape_blurs_first_then_closes(game, monkeypatch):
     key(game, pygame.K_ESCAPE)
     assert not game.item_window.visible and game.running
     key(game, pygame.K_ESCAPE)
-    assert not game.running
+    assert game.running and game.menu.visible, "третий Esc — меню паузы"
 
 
 def test_enter_blurs_the_search(game):

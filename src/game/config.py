@@ -270,6 +270,13 @@ ENEMY_SPAWN_TRIES = 200
 # Доля содержимого, которая выпадает из разрушенного врагом здания (plan/03).
 ENEMY_DESTROY_DROP_RATIO = 0.5  # 🔧
 SHOT_TRACER_TIME = 0.08    # с — сколько виден след выстрела (рендер)
+# M6: москиты (с 3-го дня) и артиллерия (с 5-го дня), plan/05 «Когда что появляется».
+MOSQUITO_FROM_DAY = 3      # 🔧
+MOSQUITO_GROUP = (3, 6)    # москитов в стае на закате 🔧
+ARTILLERY_FROM_DAY = 5     # 🔧
+ARTILLERY_PER_NIGHT = 1    # 🔧
+# Ремонт дроном (M6): удержание ЛКМ по повреждённой своей постройке.
+REPAIR_RATE = 40.0         # hp в секунду 🔧
 
 ZOOM_DEFAULT = 1.0
 ZOOM_MIN = 0.5

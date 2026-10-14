@@ -150,6 +150,9 @@ LASER_RED = rgb("#ff5a3c")
 LASER_RED_CORE = rgb("#ffd9c4")
 LASER_BLUE = rgb("#5cc8ff")
 LASER_BLUE_CORE = rgb("#dff2ff")
+LASER_GREEN = rgb("#5cf0a0")        # ремонт (M6): «строит», а не жжёт и не читает
+LASER_GREEN_CORE = rgb("#e2ffef")
+ARTILLERY_RING = rgb("#ff7a1a")
 
 #: Вид действия дрона (`sim/units.py`) → цвет луча и его ядра. Единственное
 #: место этого соответствия: и рендер, и тесты берут цвета отсюда.
@@ -158,6 +161,7 @@ ACTION_COLORS: dict[str, Color] = {
     "dismantle": LASER_RED,
     "study": LASER_BLUE,
     "scan": LASER_BLUE,
+    "repair": LASER_GREEN,
 }
 
 #: Ядро луча — по тому же виду действия.
@@ -166,6 +170,7 @@ ACTION_CORES: dict[str, Color] = {
     "dismantle": LASER_RED_CORE,
     "study": LASER_BLUE_CORE,
     "scan": LASER_BLUE_CORE,
+    "repair": LASER_GREEN_CORE,
 }
 
 

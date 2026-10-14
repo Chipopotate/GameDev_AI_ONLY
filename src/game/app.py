@@ -22,6 +22,7 @@ from src.game.ui import fonts, widgets
 from src.game.ui.debug import DebugOverlay
 from src.game.ui.hud import Hud
 from src.game.ui.item_window import MODE_CONTAINER, ItemWindow
+from src.game.ui.pause_menu import ACTION_QUIT, ACTION_RESUME, PauseMenu
 from src.game.ui.state import UiState
 
 # Допуск при сравнении накопленного времени с шагом симуляции.
@@ -62,6 +63,8 @@ class Game:
         self.hud = Hud(self.renderer.icons)
         self.item_window = ItemWindow(self.renderer.icons, self.ui)
         self.debug = DebugOverlay()
+        # Меню паузы на Esc (просьба автора): выход из игры — только его кнопкой.
+        self.menu = PauseMenu()
         # Галерея спрайтов (plan/09 §12): F4 — сравнить все формы на одном экране.
         self.gallery = Gallery(self.renderer.sprites, self.renderer.icons,
                                self.sim.run.items, seed=self.seed)
@@ -139,10 +142,17 @@ class Game:
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
-        elif self.sim.defeated:
-            # Экран поражения: игра стоит, Esc — выход.
+        elif self.menu.visible or self.sim.defeated:
+            # Меню паузы или экран поражения: мир стоит, работают Esc и кнопки.
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                self.running = False
+                self.menu.toggle()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                    and self.menu.visible:
+                action = self.menu.click(event.pos)
+                if action == ACTION_QUIT:
+                    self.running = False
+                elif action == ACTION_RESUME:
+                    self.menu.visible = False
         elif event.type == pygame.TEXTINPUT:
             if self.ui.text_input_active:
                 self.item_window.craft.search.insert(event.text)
@@ -235,13 +245,14 @@ class Game:
             self._handle_text_key(key)
             return
         if key == pygame.K_ESCAPE:
-            # Esc закрывает окно, а не игру: окно поверх мира — первый шаг назад.
+            # Esc закрывает окно, а без окон открывает меню паузы — игру он
+            # не закрывает: выход только кнопкой «Выйти» (просьба автора).
             if self.gallery_visible:
                 self.gallery_visible = False
             elif self.item_window.visible:
                 self.item_window.close(self.sim)
             else:
-                self.running = False
+                self.menu.visible = True
         elif key == pygame.K_SPACE:
             self.paused = not self.paused
         elif key == pygame.K_e:
@@ -289,7 +300,7 @@ class Game:
 
         В паузе не делает ничего — это и есть вся реализация паузы.
         """
-        if self.paused:
+        if self.paused or self.menu.visible:
             return 0
         self._acc += dt
         steps = 0
@@ -312,7 +323,7 @@ class Game:
         # dt идёт и в рендер: от него зависят анимации (а не от частоты кадров).
         # На паузе анимации стоят: картинка замирает вместе с симуляцией
         # (лента, луч дрона, частицы), а не продолжает жить своей жизнью.
-        anim_dt = 0.0 if self.paused else dt
+        anim_dt = 0.0 if self.paused or self.menu.visible else dt
         if self.sim.defeated and self.sim.breach_point is not None \
                 and not self._defeat_shown:
             # Экран поражения показывает точку прорыва (M5): камера — туда.
@@ -333,6 +344,9 @@ class Game:
             self.hud.draw_pause(self.screen)
         if self.sim.defeated:
             self.hud.draw_defeat(self.screen, self.sim)
+        if self.menu.visible:
+            self.hud.draw_pause_shade(self.screen)
+            self.menu.draw(self.screen, pygame.mouse.get_pos())
         if self.gallery_visible:
             self.gallery.draw(self.screen, hint="F4 или Esc — закрыть")
         self.debug.draw(self.screen, self.sim, self.camera, self.renderer,

@@ -108,10 +108,14 @@ class Hud:
         if sim.breach_point is not None:
             bx, by = sim.breach_point
             lines.append(f"Точка прорыва: тайл {bx}, {by} (красное кольцо)")
-        lines.append("Esc — выход")
+        lines.append("Esc — меню (кнопка «Выйти»)")
         for i, line in enumerate(lines):
             widgets.draw_text(target, line, (cx, 128 + i * 22), color=theme.UI_TEXT,
                               size=config.UI_FONT_SIZE, align="center")
+
+    def draw_pause_shade(self, target: pygame.Surface) -> None:
+        """Затемнение под меню паузы (без надписи — её рисует меню)."""
+        target.blit(_pause_overlay(target.get_size()), (0, 0))
 
     def draw_pause(self, target: pygame.Surface) -> None:
         """Плашка паузы — самым верхним слоем: иначе её закрывало окно предметов."""
@@ -360,11 +364,15 @@ class Hud:
         if target is None:
             return None
         name = building_def(building.kind if building is not None else "lamp").name
+        if sim.repair_target is target:
+            return f"Чиню: {name}", theme.LASER_GREEN
         if sim.dismantle_target is target:
             return f"Разбираю: {name}", theme.DISMANTLE_RING
         if sim.dismantle_candidate() is None:
             return f"{name}: слишком далеко", theme.UI_TEXT_DIM
-        text = f"{name}: ЛКМ (держать) — разобрать"
+        damaged = target.hp < building_def(building.kind if building is not None
+                                           else "lamp").hp
+        text = f"{name}: ЛКМ (держать) — {'чинить' if damaged else 'разобрать'}"
         if building is not None and building.containers:
             text += ", ПКМ — контейнеры"
         return text, theme.UI_TEXT
